@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Iterator, Literal, Optional, TYPE_CHECKING
+from typing import Any, Iterator, Literal, Optional, Callable, TYPE_CHECKING
 
 from contextlib import contextmanager
 
@@ -75,8 +75,8 @@ class CCSRProcessor(SupportModelImageProcessor):
         strength: float=1.0,
         tile_diffusion_size: Optional[int]=512,
         tile_diffusion_stride: Optional[int]=256,
-        tile_vae_decode_size: Optional[int]=160,
-        tile_vae_encode_size: Optional[int]=1024,
+        tile_vae_decode_size: Optional[int]=128,
+        tile_vae_encode_size: Optional[int]=512,
         color_fix_type: Optional[Literal["wavelet", "adain"]]="adain",
         t_min: float=0.3333,
         t_max: float=0.6667,
@@ -84,7 +84,8 @@ class CCSRProcessor(SupportModelImageProcessor):
         positive_prompt: str="",
         negative_prompt: str="",
         cfg_scale: float=1.0,
-        outscale: int=2
+        outscale: int=2,
+        progress_callback: Optional[Callable[[int, int, float], None]]=None,
     ) -> Image.Image:
         """
         Upscales an image using CCSR
@@ -92,9 +93,11 @@ class CCSRProcessor(SupportModelImageProcessor):
         import torch
         import numpy as np
         from einops import rearrange
-        from math import ceil
+        from math import ceil, floor
+        from enfugue.util import get_step_callback, logger
         from enfugue.diffusion.support.upscale.ccsr.utils.image import auto_resize # type: ignore
         from enfugue.diffusion.support.upscale.ccsr.model.q_sampler import SpacedSampler # type: ignore
+
         # seed
         if seed is not None:
             import pytorch_lightning as pl
@@ -125,14 +128,18 @@ class CCSRProcessor(SupportModelImageProcessor):
         self.ccsr.control_scales = [strength] * 13
         # Instantiate sampler
         sampler = SpacedSampler(self.ccsr, var_type="fixed_small")
+        num_decode_steps = 1
         # Set tiling
-        if tile_vae_decode_size and tile_vae_encode_size:
+        if tile_vae_decode_size and tile_vae_encode_size and max(height // 8, width // 8) > 22 + tile_vae_decode_size:
+            num_decode_height_tiles = ceil((height // 8 - 22) / tile_vae_decode_size)
+            num_decode_width_tiles = ceil((width // 8 - 22) / tile_vae_decode_size)
+            num_decode_steps = max(1, num_decode_height_tiles) * max(1, num_decode_width_tiles)
             self.ccsr._init_tiled_vae(
                 encoder_tile_size=tile_vae_encode_size,
                 decoder_tile_size=tile_vae_decode_size
             )
-        # Sample
-        sample_kwargs = {
+        # Gather sampler arguments
+        sampler_kwargs = {
             "steps": num_steps,
             "t_max": t_max,
             "t_min": t_min,
@@ -144,14 +151,29 @@ class CCSRProcessor(SupportModelImageProcessor):
             "cfg_scale": cfg_scale,
             "color_fix_type": "none" if not color_fix_type else color_fix_type
         }
-        if tile_diffusion_size and tile_diffusion_stride:
-            samples = sampler.sample_with_tile_ccsr(
-                tile_size=tile_diffusion_size,
-                tile_stride=tile_diffusion_stride,
-                **sample_kwargs
+        if tile_diffusion_size and tile_diffusion_stride and max(height, width) > tile_diffusion_size:
+            sample_windows = sampler.get_sliding_windows(
+                height // 8,
+                width // 8,
+                tile_diffusion_size // 8,
+                tile_diffusion_stride // 8
             )
+            num_sample_steps = len(sample_windows) * (1 + num_steps)
+            sampler_kwargs["tile_size"] = tile_diffusion_size
+            sampler_kwargs["tile_stride"] = tile_diffusion_stride
+            execute_sampler = sampler.sample_with_tile_ccsr
         else:
-            samples = sampler.sample_ccsr(**sample_kwargs)
+            num_sample_steps = num_steps
+            execute_sampler = sampler.sample_ccsr
+        # Get step callback
+        num_sample_steps = floor(num_sample_steps * (t_max - t_min))
+        total_steps = num_decode_steps + num_sample_steps
+        logger.debug(f"Calculated total steps to be {total_steps}: {num_sample_steps} sampling step(s) + {num_decode_steps} decoding step(s)")
+        step_complete = get_step_callback(total_steps, progress_callback=progress_callback)
+
+        # Execute sampler
+        samples = execute_sampler(step_complete=step_complete, **sampler_kwargs)
+
         # Return to image
         samples = samples.clamp(0, 1)
         samples = (rearrange(samples, "b c h w -> b h w c") * 255).cpu().numpy().clip(0, 255).astype(np.uint8)

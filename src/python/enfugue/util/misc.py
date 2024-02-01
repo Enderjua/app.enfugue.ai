@@ -1,6 +1,7 @@
 import math
+import datetime
 
-from typing import Dict, Any, Iterator, List, Iterable, Optional
+from typing import Dict, Any, Iterator, List, Iterable, Optional, Callable, Union
 from contextlib import contextmanager
 
 __all__ = [
@@ -10,7 +11,9 @@ __all__ = [
     "redact_for_log",
     "profiler",
     "reiterator",
-    "human_duration"
+    "human_duration",
+    "get_step_callback",
+    "get_step_iterator"
 ]
 
 def noop(*args: Any, **kwargs: Any) -> None:
@@ -195,3 +198,72 @@ def human_duration(seconds: int, trim: bool = True, compact: bool = False) -> st
         else:
             return duration_separator.join(duration_parts[1:])
     return duration_string
+
+def get_step_callback(
+    overall_steps: int,
+    task: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, float], None]] = None,
+    log_interval: int = 5,
+    log_sampling_duration: Union[int, float] = 2,
+) -> Callable[..., None]:
+    """
+    Creates a scoped callback to trigger during iterations
+    """
+    from enfugue.util.log import logger
+
+    overall_step, window_start_step, its = 0, 0, 0.0
+    window_start = datetime.datetime.now()
+    digits = math.ceil(math.log10(overall_steps))
+    log_prefix = "" if not task else f"[{task}] "
+
+    def step_complete(increment_step: bool = True) -> None:
+        """
+        Called when a step is completed.
+        """
+        nonlocal overall_step, window_start, window_start_step, its
+
+        if increment_step:
+            overall_step += 1
+
+        if overall_step != 0 and overall_step % log_interval == 0 or overall_step == overall_steps:
+            seconds_in_window = (datetime.datetime.now() - window_start).total_seconds()
+            its = (overall_step - window_start_step) / seconds_in_window
+            unit = "s/it" if its < 1 else "it/s"
+            its_display = 0 if its == 0 else 1 / its if its < 1 else its
+
+            logger.debug(
+                f"{{0:s}}{{1:0{digits}d}}/{{2:0{digits}d}}: {{3:0.2f}} {{4:s}}".format(
+                    log_prefix, overall_step, overall_steps, its_display, unit
+                )
+            )
+
+            if seconds_in_window > log_sampling_duration:
+                window_start_step = overall_step
+                window_start = datetime.datetime.now()
+
+        if progress_callback is not None:
+            progress_callback(overall_step, overall_steps, its)
+
+    return step_complete
+
+def get_step_iterator(
+    items: Iterable[Any],
+    task: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, float], None]] = None,
+    log_interval: int = 5,
+    log_sampling_duration: Union[int, float] = 2,
+) -> Iterator[Any]:
+    """
+    Gets an iterator over items that will call the progress function over each item.
+    """
+    items = [item for item in items]
+    callback = get_step_callback(
+        len(items),
+        task=task,
+        progress_callback=progress_callback,
+        log_interval=log_interval,
+        log_sampling_duration=log_sampling_duration
+    )
+    for item in items:
+        yield item
+        callback(True)

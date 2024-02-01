@@ -12,6 +12,13 @@ from enfugue.diffusion.support.model import SupportModel, SupportModelImageProce
 
 __all__ = ["PoseDetector"]
 
+class InstantiationException(Exception):
+    def __init__(self, exception: Exception):
+        super(InstantiationException, self).__init__("Could not instantiated DWPose: {0}({1})".format(
+            type(exception).__name__,
+            exception
+        ))
+
 class PoseImageProcessor(SupportModelImageProcessor):
     """
     Uses a pose detector to detect human poses, hands, and faces
@@ -20,7 +27,13 @@ class PoseImageProcessor(SupportModelImageProcessor):
         super(PoseImageProcessor, self).__init__(**kwargs)
         self.detector = detector
 
-    def detail_mask(self, image: Image, include_hands=True, include_face=True) -> Image:
+    def detail_mask(
+        self,
+        image: Image,
+        include_hands: bool=True,
+        include_face: bool=True,
+        isolated: bool=False,
+    ) -> Union[Image, List[Image]]:
         """
         Calls the detector and draws the detail mask (hands and face)
         """
@@ -33,14 +46,24 @@ class PoseImageProcessor(SupportModelImageProcessor):
         else:
             # Return black
             from PIL import Image
-            return Image.new(image.mode, image.size)
-        return self.detector( # type: ignore[call-arg]
+            black_image = Image.new(image.mode, image.size)
+            if isolated:
+                return [black_image]
+            return black_image
+        detected = self.detector( # type: ignore[call-arg]
             image,
             include_body=False,
             include_hand=include_hands,
             include_face=include_face,
             draw_type=draw_type,
-        ).resize(image.size)
+            isolated=isolated
+        )
+        if isolated:
+            for i in range(len(detected)):
+                detected[i] = detected[i].resize(image.size)
+        else:
+            detected = detected.resize(image.size)
+        return detected
 
     def __call__(self, image: Image) -> Image:
         """
@@ -69,20 +92,27 @@ class PoseDetector(SupportModel):
         """
         Gets and runs the DWPose detector.
         """
-        from enfugue.diffusion.support.pose.dwpose import DWposeDetector  # type: ignore
-
-        with self.context():
-            detect_model_path = self.get_model_file(self.DW_DETECT_MODEL_PATH)
-            pose_model_path = self.get_model_file(self.DW_POSE_MODEL_PATH)
-            detector = DWposeDetector(
-                det_ckpt=detect_model_path,
-                pose_ckpt=pose_model_path
-            )
-            detector.to(self.device)
-            processor = PoseImageProcessor(detector)
-            yield processor
-            del processor
-            del detector
+        try:
+            from enfugue.diffusion.support.pose.dwpose import DWposeDetector  # type: ignore
+            has_yielded = False
+            with self.context():
+                detect_model_path = self.get_model_file(self.DW_DETECT_MODEL_PATH)
+                pose_model_path = self.get_model_file(self.DW_POSE_MODEL_PATH)
+                detector = DWposeDetector(
+                    det_ckpt=detect_model_path,
+                    pose_ckpt=pose_model_path
+                )
+                detector.to(self.device)
+                processor = PoseImageProcessor(detector)
+                has_yielded = True
+                yield processor
+                del processor
+                del detector
+        except Exception as ex:
+            if not has_yielded:
+                raise InstantiationException(ex)
+            else:
+                raise
 
     @contextmanager
     def openpose(self) -> Iterator[SupportModelImageProcessor]:
@@ -111,14 +141,11 @@ class PoseDetector(SupportModel):
         """
         Uses DWPose if available, otherwise uses OpenPose.
         """
-        yielded = False
         try:
             with self.dwpose() as processor:
                 logger.debug("Using DWPose for pose detection.")
-                yielded = True
                 yield processor
-        except:
-            if not yielded:
-                with self.openpose() as processor:
-                    logger.debug("Using OpenPose for pose detection.")
-                    yield processor
+        except InstantiationException:
+            with self.openpose() as processor:
+                logger.debug("Using OpenPose for pose detection.")
+                yield processor

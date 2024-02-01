@@ -54,7 +54,6 @@
 import gc
 import math
 from time import time
-from tqdm import tqdm
 
 import torch
 import torch.version
@@ -383,7 +382,7 @@ class VAEHook:
         self.to_gpu = to_gpu
         self.pad = 11 if is_decoder else 32         # FIXME: magic number
 
-    def __call__(self, x):
+    def __call__(self, x, step_complete=None):
         original_device = next(self.net.parameters()).device
         try:
             if self.to_gpu:
@@ -391,10 +390,9 @@ class VAEHook:
         
             B, C, H, W = x.shape
             if max(H, W) <= self.pad * 2 + self.tile_size:
-                print("[Tiled VAE]: the input size is tiny and unnecessary to tile.")
-                return self.net.original_forward(x)
+                return self.net.original_forward(x, step_complete=step_complete)
             else:
-                return self.vae_tile_forward(x)
+                return self.vae_tile_forward(x, step_complete=step_complete)
         finally:
             self.net = self.net.to(original_device)
 
@@ -517,7 +515,7 @@ class VAEHook:
 
     @perfcount
     @torch.no_grad()
-    def vae_tile_forward(self, z):
+    def vae_tile_forward(self, z, step_complete=None):
         """
         Decode a latent vector z into an image in a tiled manner.
         @param z: latent vector
@@ -584,9 +582,6 @@ class VAEHook:
         # Free memory of input latent tensor
         del z
 
-        # Task queue execution
-        pbar = tqdm(total=num_tiles * len(task_queues[0]), desc=f"[Tiled VAE]: Executing {'Decoder' if is_decoder else 'Encoder'} Task Queue: ")
-
         # execute the task back and forth when switch tiles so that we always
         # keep one tile on the GPU to reduce unnecessary data transfer
         forward = True
@@ -626,7 +621,6 @@ class VAEHook:
                         task[1] = None
                     else:
                         tile = task[1](tile)
-                    pbar.update(1)
 
                 if interrupted: break
 
@@ -637,6 +631,8 @@ class VAEHook:
                 if len(task_queue) == 0:
                     tiles[i] = None
                     num_completed += 1
+                    if step_complete is not None:
+                        step_complete(True)
                     if result is None:      # NOTE: dim C varies from different cases, can only be inited dynamically
                         result = torch.zeros((N, tile.shape[1], height * 8 if is_decoder else height // 8, width * 8 if is_decoder else width // 8), device=device, requires_grad=False)
                     result[:, :, out_bboxes[i][2]:out_bboxes[i][3], out_bboxes[i][0]:out_bboxes[i][1]] = crop_valid_region(tile, in_bboxes[i], out_bboxes[i], is_decoder)
@@ -662,7 +658,6 @@ class VAEHook:
                     task_queue.insert(0, ('apply_norm', group_norm_func))
 
         # Done!
-        pbar.close()
         return result if result is not None else result_approx.to(device)
 
 

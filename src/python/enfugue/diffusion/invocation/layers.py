@@ -135,7 +135,9 @@ class LayeredInvocation:
     # Inpainting
     mask: Optional[Union[str, Image, List[Image]]]=None
     crop_inpaint: bool=True
+    scale_inpaint: bool=True
     inpaint_feather: int=32
+    inpaint_upscale_amount: float=1.0
     outpaint: bool=True
     outpaint_dilate: int=4
     # Refining
@@ -157,12 +159,15 @@ class LayeredInvocation:
     detailer_guidance_scale: Optional[float]=None
     detailer_inference_steps: Optional[int]=None
     detailer_inpaint_strength: float=0.25
-    detailer_inpaint_dilate: int=32
+    detailer_inpaint_dilate_ratio: float=0.33
     detailer_inpaint_blur: int=16
-    detailer_denoising_strength: Optional[float]=0.0
+    detailer_inpaint_feather: int=16
+    detailer_inpaint_min_size: int=64
+    detailer_inpaint_ip_adapter_scale=0.65
     detailer_controlnet: Optional[CONTROLNET_LITERAL]=None
     detailer_controlnet_scale: float=1.0
     detailer_switch_pipeline: bool=False
+    detailer_upscale_amount: float=1.0
     upscale: Optional[Union[UpscaleStepDict, List[UpscaleStepDict]]]=None
     interpolate_frames: Optional[int]=None
     reflect: bool=False
@@ -316,6 +321,130 @@ class LayeredInvocation:
 
         image.paste(foreground, position[:2], mask=mask)
         return image
+
+    @classmethod
+    def find_overlap(
+        cls,
+        bbox1: Tuple[Tuple[int, int], Tuple[int, int]],
+        bbox2: Tuple[Tuple[int, int], Tuple[int, int]]
+    ) -> Optional[Tuple[int, int], Tuple[int, int]]:
+        """
+        Find the overlapping bounding box of two given bounding boxes.
+        """
+        (x00, y00), (x01, y01) = bbox1
+        (x10, y10), (x11, y11) = bbox2
+
+        ox0 = max(x00, x10)
+        oy0 = max(y00, y10)
+        ox1 = min(x01, x11)
+        oy1 = min(y01, y11)
+
+        if ox0 < ox1 and oy0 < oy1:
+            return ((ox0, oy0), (ox1, oy1))
+        else:
+            return None
+
+    @classmethod
+    def distance(
+        cls,
+        bbox1: Tuple[int, int, int, int],
+        bbox2: Tuple[int, int, int, int]
+    ) -> float:
+        """
+        Calculate the Euclidean distance between the centers of two bounding boxes
+        """
+        from math import sqrt
+        (x00, y00), (x01, y01) = bbox1
+        (x10, y10), (x11, y11) = bbox2
+        cx1, cy1 = ((x00 + x01) / 2, (y00 + y01) / 2)
+        cx2, cy2 = ((x10 + x11) / 2, (y10 + y11) / 2)
+        return sqrt((cx1 - cx2)**2 + (cy1 - cy2)**2)
+
+    @classmethod
+    def group_bounding_boxes(
+        cls,
+        width: int,
+        height: int,
+        frames: List[List[Tuple[int, int, int, int]]]
+    ) -> List[List[Optional[Tuple[int, Tuple[int, int, int, int]]]]]:
+        """
+        Groups bounding boxes by minimum distance (tracks individual features)
+        """
+        max_movement = 0.1 * min(width, height) # 10% of the smallest dimension
+        groups = []
+
+        def recurse_frames(frames: List[List[Tuple[int, int, int, int]]]) -> None:
+            """
+            Recurses through the frame array and tracks
+            """
+            frame = frames[0]
+            unfound = []
+            groups_found = []
+            for i, bounding_box in enumerate(frame):
+                nearest_group = None
+                nearest_distance = None
+                for j, group_bboxes in enumerate(groups):
+                    if j in groups_found:
+                        continue
+                    last_known_position = [bbox[1] for bbox in group_bboxes if bbox][-1]
+                    this_distance = cls.distance(bounding_box, last_known_position)
+                    if nearest_group is None or nearest_distance is None or this_distance < nearest_distance:
+                        nearest_group = j
+                        nearest_distance = this_distance
+                if nearest_distance is not None and nearest_distance < max_movement:
+                    groups[nearest_group].append((i, bounding_box))
+                    groups_found.append(nearest_group)
+                else:
+                    unfound.append((i, bounding_box))
+            for j in range(len(groups)):
+                if j not in groups_found:
+                    groups[j].append(None)
+            for i, bounding_box in unfound:
+                groups.append(([None] * (0 if not groups else len(groups[0])-1)) + [(i, bounding_box)])
+            if len(frames) > 1:
+                recurse_frames(frames[1:])
+
+        recurse_frames(frames)
+        return groups
+
+    @classmethod
+    def extend_mask(cls, image: Image, move_up_pixels: int) -> Image:
+        """
+        Extends a mask vertically from its widest point
+        """
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        # Convert image to grayscale and threshold to ensure we have a binary image
+        gray = np.array(image)
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+
+        # Find the horizontal projection by summing up the values of pixels along rows
+        horizontal_projection = np.sum(binary, axis=1)
+
+        # The widest point is where the horizontal projection will have the maximum value
+        widest_row = np.argmax(horizontal_projection)
+        # Get the left/right position
+        indices = np.where(binary[widest_row])[0]
+        left, right = min(indices), max(indices)
+
+        # Split the image at the widest row
+        top_part = binary[:widest_row, :]
+        bottom_part = binary[widest_row:, :]
+
+        # Create a new image that will contain the adjusted mask
+        adjusted_image = np.zeros(tuple(binary.shape[:2]), dtype=np.uint8)
+
+        # Fill the new image: place the top part higher by move_up_pixels
+        adjusted_image[:widest_row-move_up_pixels, :] = top_part[move_up_pixels:]
+        adjusted_image[widest_row-move_up_pixels:widest_row, left:right+1] = 255
+
+        # Fill in the rest of the mask below the widest part
+        adjusted_image[widest_row:, :] = bottom_part
+
+        return Image.fromarray(adjusted_image)
+
 
     @property
     def upscale_steps(self) -> Iterator[UpscaleStepDict]:
@@ -1375,12 +1504,12 @@ class LayeredInvocation:
         # Set up the pipeline
         safe_status = pipeline.safe # Store this in case we override
         pipeline.set_task_callback(task_callback)
-
+        results = None
         try:
             original_image_callback: Optional[Callable] = None
             cropped_inpaint_position = None
             background = None
-            has_post_processing = bool(self.upscale) or self.detailer_face_restore or ((self.detailer_face_inpaint or self.detailer_hand_inpaint) and self.detailer_denoising_strength)
+            has_post_processing = bool(self.upscale) or self.detailer_face_restore or ((self.detailer_face_inpaint or self.detailer_hand_inpaint) and self.detailer_inpaint_strength)
 
             if self.animation_frames:
                 has_post_processing = has_post_processing or bool(self.interpolate_frames) or self.reflect or self.animation_engine == "svd"
@@ -1417,11 +1546,14 @@ class LayeredInvocation:
 
                 # Prepare the pipeline manager
                 self.prepare_pipeline(pipeline)
+
                 # Determine if we're doing cropped inpainting
                 if invocation_kwargs.get("mask", None) is not None and self.crop_inpaint:
+                    inpaint_size = self.tiling_size if self.tiling_size else 1024 if pipeline.inpainter_is_sdxl else 512
+
                     (x0, y0), (x1, y1) = self.get_inpaint_bounding_box(
                         invocation_kwargs["mask"],
-                        size=self.tiling_size if self.tiling_size else 1024 if pipeline.inpainter_is_sdxl else 512,
+                        size=inpaint_size if not self.scale_inpaint else 64,
                         feather=self.inpaint_feather
                     )
 
@@ -1432,6 +1564,7 @@ class LayeredInvocation:
 
                     bbox_width = x1 - x0
                     bbox_height = y1 - y0
+
                     pixel_ratio = (bbox_height * bbox_width) / (mask_width * mask_height)
                     pixel_savings = (1.0 - pixel_ratio) * 100
 
@@ -1453,6 +1586,13 @@ class LayeredInvocation:
                     else:
                         background = invocation_kwargs["image"].copy()
 
+                    # Get sizes
+                    x0, y0, x1, y1 = cropped_inpaint_position
+                    width = x1 - x0
+                    height = y1 - y0
+                    original_width = width
+                    original_height = height
+
                     # First wrap callbacks if needed
                     if image_callback is not None:
                         # Hijack image callback to paste onto background
@@ -1462,12 +1602,20 @@ class LayeredInvocation:
                             """
                             if isinstance(background, list):
                                 images = [
-                                    self.paste_inpaint_image((background[i] if i < len(background) else background[-1]), image, cropped_inpaint_position) # type: ignore
+                                    self.paste_inpaint_image(
+                                        (background[i] if i < len(background) else background[-1]),
+                                        image.resize((original_width, original_height)),
+                                        cropped_inpaint_position
+                                    )
                                     for i, image in enumerate(images)
                                 ]
                             else:
                                 images = [
-                                    self.paste_inpaint_image(background, image, cropped_inpaint_position) # type: ignore
+                                    self.paste_inpaint_image(
+                                        background,
+                                        image.resize((original_width, original_height)),
+                                        cropped_inpaint_position
+                                    )
                                     for image in images
                                 ]
 
@@ -1495,13 +1643,31 @@ class LayeredInvocation:
                             for image_dict in invocation_kwargs["control_images"][controlnet]:
                                 image_dict["image"] = image_dict["image"].crop(cropped_inpaint_position)
 
+                    # Scale images if needed
+                    if self.scale_inpaint and (inpaint_size > original_width or inpaint_size > original_height):
+                        scale_size = inpaint_size / max(original_width, original_height) + self.inpaint_upscale_amount
+                        logger.debug(f"Scaling inpaint by {scale_size}")
+                        width = int(((width * scale_size) // 8) * 8)
+                        height = int(((height * scale_size) // 8) * 8)
+                        if isinstance(invocation_kwargs["image"], list):
+                            invocation_kwargs["image"] = [
+                                img.resize((width, height))
+                                for img in invocation_kwargs["image"]
+                            ]
+                            invocation_kwargs["mask"] = [
+                                img.resize((width, height), resample=PIL_INTERPOLATION["nearest"])
+                                for img in invocation_kwargs["mask"]
+                            ]
+                        else:
+                            invocation_kwargs["image"] = invocation_kwargs["image"].resize((width, height))
+                            invocation_kwargs["mask"] = invocation_kwargs["mask"].resize((width, height), resample=PIL_INTERPOLATION["nearest"])
+
                     # Assign height and width
-                    x0, y0, x1, y1 = cropped_inpaint_position
-                    invocation_kwargs["width"] = x1 - x0
-                    invocation_kwargs["height"] = y1 - y0
+                    invocation_kwargs["width"] = width
+                    invocation_kwargs["height"] = height
 
                 # Execute primary inference
-                images, nsfw = self.execute_inference(
+                results, nsfw = self.execute_inference(
                     pipeline,
                     task_callback=task_callback,
                     progress_callback=progress_callback,
@@ -1512,12 +1678,19 @@ class LayeredInvocation:
 
             if background is not None and cropped_inpaint_position is not None:
                 # Paste the image back onto the background
-                for i, image in enumerate(images):
-                    images[i] = self.paste_inpaint_image(
+                x0, y0, x1, y1 = cropped_inpaint_position
+                width = x1 - x0
+                height = y1 - y0
+                images = [
+                    self.paste_inpaint_image(
                         background[i] if isinstance(background, list) else background,
-                        image,
-                        cropped_inpaint_position[:2]
+                        result.resize((width, height)),
+                        cropped_inpaint_position
                     )
+                    for i, result in enumerate(results)
+                ]
+            elif results:
+                images = results
 
             # Execute SVD, if requested
             images, nsfw = self.execute_stable_video(
@@ -1574,13 +1747,13 @@ class LayeredInvocation:
             pipeline.stop_keepalive() # Make sure this is stopped
             pipeline.clear_memory() # Clear memory
 
-    def prepare_pipeline(self, pipeline: DiffusionPipelineManager) -> None:
+    def prepare_pipeline(self, pipeline: DiffusionPipelineManager, ignore_animation: bool=False) -> None:
         """
         Assigns pipeline-level variables.
         """
         pipeline.start_keepalive() # Make sure this is going
 
-        if self.animation_frames is not None and self.animation_frames > 0 and self.animation_engine != "svd":
+        if self.animation_frames is not None and self.animation_frames > 0 and self.animation_engine != "svd" and not ignore_animation:
             pipeline.animator = self.model
             pipeline.animator_vae = self.vae # type: ignore[assignment]
             pipeline.frame_window_size = self.frame_window_size # type: ignore[assignment]
@@ -1642,7 +1815,7 @@ class LayeredInvocation:
         """
         from PIL import Image, ImageDraw
 
-        # Define progress and latent callback kwargs, we'll add task callbacks ourself later
+        # Define progress and latent callback kwargs
         callback_kwargs = {
             "progress_callback": progress_callback,
             "latent_callback_steps": image_callback_steps,
@@ -1848,13 +2021,73 @@ class LayeredInvocation:
         invocation_kwargs: Dict[str, Any] = {}
     ) -> Tuple[List[Image], List[bool]]:
         """
-        Runs the after detailer
+        Runs the after detailer.
         """
-        if not self.detailer_face_restore and not self.detailer_face_inpaint and not self.detailer_hand_inpaint and not self.detailer_denoising_strength:
+        # Guard clause, make sure detailing was requested.
+        if not self.detailer_face_restore and not self.detailer_face_inpaint and not self.detailer_hand_inpaint:
             return images, nsfw
 
-        from PIL import ImageFilter
+        from PIL import Image, ImageFilter
+        from enfugue.diffusion.util import Video
 
+        isolated_detail_masks = []
+        isolated_bounding_boxes = []
+        detail_masks = []
+
+        width, height = images[0].size
+
+        black_mask = Image.new("L", (width, height))
+        white_mask = Image.new("L", (width, height), (255))
+
+        # First get detailing masks; we'll use them for pasting the face fix and inpainting
+        with pipeline.control_image_processor.pose_detector.best() as pose_detector:
+            for i, image in enumerate(images):
+                isolated_detail_masks.append(
+                    [
+                        this_mask.convert("L")
+                        for this_mask in pose_detector.detail_mask( # type: ignore[attr-defined]
+                            image,
+                            include_hands=self.detailer_hand_inpaint,
+                            include_face=self.detailer_face_inpaint or self.detailer_face_restore,
+                            isolated=True
+                        )
+                    ]
+                )
+                isolated_bounding_boxes.append([])
+                detail_masks.append(black_mask.copy())
+                for isolated_mask in isolated_detail_masks[-1]:
+                    detail_masks[-1].paste(white_mask, mask=isolated_mask)
+                    isolated_bounding_boxes[-1].append(self.get_inpaint_bounding_box(
+                        isolated_mask,
+                        size=self.detailer_inpaint_min_size,
+                        feather=self.detailer_inpaint_feather
+                    ))
+
+        # Check and perform face restore pass
+        if self.detailer_face_restore:
+            with pipeline.upscaler.face_restore() as restore:
+                if task_callback is not None:
+                    task_callback("Restoring Faces")
+                if progress_callback is not None:
+                    progress_callback(0, len(images), 0.0)
+
+                for i, image in enumerate(images):
+                    restore_start = datetime.now()
+                    paste_mask = dilate_erode(detail_masks[i], 16)
+                    paste_mask = paste_mask.filter(ImageFilter.BoxBlur(self.detailer_inpaint_blur)) # type: ignore[union-attr]
+                    images[i].paste(restore(image), mask=paste_mask.convert("L"))
+                    if progress_callback is not None:
+                        restore_time = (datetime.now() - restore_start).total_seconds()
+                        progress_callback(i, len(images), 1/restore_time)
+
+            if image_callback is not None:
+                image_callback(images)
+
+        # Guard clause, if no inpaint requested go ahead and return
+        if not (self.detailer_face_inpaint or self.detailer_hand_inpaint) and self.detailer_inpaint_strength:
+            return images, nsfw
+
+        # We will be inpainting, first assemble our arguments
         prompt = self.merge_prompts( # type: ignore[assignment]
             (DEFAULT_UPSCALE_PROMPT, 1.0),
             (self.prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
@@ -1865,7 +2098,6 @@ class LayeredInvocation:
                 for prompt_dict in (self.prompts if self.prompts is not None else [])
             ]
         )
-
         prompt_2 = self.merge_prompts(
             (self.prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
             (self.model_prompt_2, MODEL_PROMPT_WEIGHT),
@@ -1875,7 +2107,6 @@ class LayeredInvocation:
                 for prompt_dict in (self.prompts if self.prompts is not None else [])
             ]
         )
-
         negative_prompt = self.merge_prompts(
             (self.negative_prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
             (self.model_negative_prompt, MODEL_PROMPT_WEIGHT),
@@ -1885,7 +2116,6 @@ class LayeredInvocation:
                 for prompt_dict in (self.prompts if self.prompts is not None else [])
             ]
         )
-
         negative_prompt_2 = self.merge_prompts(
             (self.negative_prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
             (self.model_negative_prompt_2, MODEL_PROMPT_WEIGHT),
@@ -1895,218 +2125,351 @@ class LayeredInvocation:
                 for prompt_dict in (self.prompts if self.prompts is not None else [])
             ]
         )
-
         guidance_scale = self.guidance_scale if self.detailer_guidance_scale is None else self.detailer_guidance_scale
         num_inference_steps = self.num_inference_steps if self.detailer_inference_steps is None else self.detailer_inference_steps
 
-        detail_masks = []
-
-        with pipeline.control_image_processor.pose_detector.best() as pose_detector:
-            for i, image in enumerate(images):
-                detail_masks.append(
-                    pose_detector.detail_mask( # type: ignore[attr-defined]
-                        image,
-                        include_hands=self.detailer_hand_inpaint,
-                        include_face=self.detailer_face_inpaint or self.detailer_face_restore
-                    ).convert("L")
-                )
-
-        if self.detailer_face_restore:
-            # Face restore pass
-            with pipeline.upscaler.face_restore() as restore:
-                if task_callback is not None:
-                    task_callback("Restoring Faces")
-                if progress_callback is not None:
-                    progress_callback(0, len(images), 0.0)
-
-                for i, image in enumerate(images):
-                    restore_start = datetime.now()
-                    paste_mask = dilate_erode(detail_masks[i], self.detailer_inpaint_dilate)
-                    paste_mask = paste_mask.filter(ImageFilter.BoxBlur(self.detailer_inpaint_blur)) # type: ignore[union-attr]
-                    images[i].paste(restore(image), mask=paste_mask.convert("L"))
-                    if progress_callback is not None:
-                        restore_time = (datetime.now() - restore_start).total_seconds()
-                        progress_callback(i, len(images), 1/restore_time)
-
-            if image_callback is not None:
-                image_callback(images)
-
-        if not ((self.detailer_face_inpaint or self.detailer_hand_inpaint) and self.detailer_inpaint_strength) and not self.detailer_denoising_strength:
-            return images, nsfw
-
+        # Check if we didn't perform inference before now; if so, we need to set up the pipeline
         if no_inference:
             self.prepare_pipeline(pipeline)
 
-        use_inpainter = self.detailer_switch_pipeline or invocation_kwargs.get("mask", None)
+        # Determine which pipeline we're going to be using
+        use_inpainter = self.detailer_switch_pipeline or invocation_kwargs.get("mask", None) and not self.animation_frames
+        inpainter_ip_adapter = "plus-face-id"
+        use_inpainter = False
 
-        if self.animation_frames:
-            if self.detailer_controlnet:
-                pipeline.animator_controlnets = self.detailer_controlnet # type: ignore[assignment]
-            else:
-                pipeline.animator_controlnets = None # type: ignore[assignment]
-            detail_pipeline = pipeline.animator_pipeline # type: ignore[assignment]
-        elif use_inpainter:
+        if use_inpainter:
+            inpaint_size = 1024 if pipeline.inpainter_is_sdxl else 512
             if self.detailer_controlnet:
                 pipeline.inpainter_controlnets = self.detailer_controlnet # type: ignore[assignment]
             else:
                 pipeline.inpainter_controlnets = None # type: ignore[assignment]
+            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+                pipeline.unload_inpainter("Setting IP Adapter Model")
+                pipeline._ip_adapter_model = inpainter_ip_adapter
             detail_pipeline = pipeline.inpainter_pipeline # type: ignore[assignment]
+        elif self.animation_frames:
+            inpaint_size = 1024 if pipeline.animator_is_sdxl else 512
+            if self.detailer_controlnet:
+                pipeline.animator_controlnets = self.detailer_controlnet # type: ignore[assignment]
+            else:
+                pipeline.animator_controlnets = None # type: ignore[assignment]
+            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+                pipeline.unload_animator("Setting IP Adapter Model")
+                pipeline._ip_adapter_model = inpainter_ip_adapter
+            detail_pipeline = pipeline.animator_pipeline # type: ignore[assignment]
         else:
+            inpaint_size = 1024 if pipeline.is_sdxl else 512
             if self.detailer_controlnet:
                 pipeline.controlnets = self.detailer_controlnet # type: ignore[assignment]
             else:
                 pipeline.controlnets = None # type: ignore[assignment]
+            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+                pipeline.unload_pipeline("Setting IP Adapter Model")
+                pipeline._ip_adapter_model = inpainter_ip_adapter
             detail_pipeline = pipeline.pipeline # type: ignore[assignment]
 
+        # If requested, store control images for each sample as well
         control_images = []
-
         if self.detailer_controlnet and self.detailer_controlnet_scale:
             with pipeline.control_image_processor.processor(self.detailer_controlnet) as process:
                 processed_control_images = []
                 for i, image in enumerate(images):
                     processed_control_images.append(process(image))
-                if self.animation_frames:
-                    control_images = [
-                        dict([
-                            (self.detailer_controlnet, [(processed_control_images, self.detailer_controlnet_scale)])
-                        ])
+                control_images = [
+                    dict([ # type: ignore[misc]
+                        (self.detailer_controlnet, [(processed_image, self.detailer_controlnet_scale)])
+                    ])
+                    for processed_image in processed_control_images
+                ]
+
+        # Assemble groupings for detail passes in animation, or create dummy groups
+        frame_box_mask_groups = [] # (start_frame, bounding_box, masks)
+        if self.animation_frames:
+            grouped_boxes = self.group_bounding_boxes(
+                self.width,
+                self.height,
+                isolated_bounding_boxes
+            )
+            for g, group in enumerate(grouped_boxes):
+                consecutive_hidden_frames = 0
+                current_frame_start = 0
+                current_frames = []
+
+                def maybe_add_frames():
+                    nonlocal current_frames, current_frame_start
+                    current_frames = current_frames[:max([i for i, v in enumerate(current_frames) if v]+[0])+1]
+                    if current_frames:
+                        current_masks = []
+                        x0, y0, x1, y1 = -1, -1, -1, -1
+                        for i, this_frame in enumerate(current_frames):
+                            if this_frame is None:
+                                current_masks.append(Image.new("L", (width, height)))
+                                continue
+                            mask_index, bounding_box = this_frame
+                            current_masks.append(
+                                isolated_detail_masks[current_frame_start+i][mask_index]
+                            )
+                            (bx0, by0), (bx1, by1) = bounding_box
+                            x0 = bx0 if x0 == -1 else min(x0, bx0)
+                            x1 = bx1 if x1 == -1 else max(x1, bx1)
+                            y0 = by0 if y0 == -1 else min(y0, by0)
+                            y1 = by1 if y1 == -1 else max(y1, by1)
+
+                        frame_box_mask_groups.append((
+                            current_frame_start,
+                            ((x0, y0), (x1, y1)),
+                            current_masks
+                        ))
+                        current_frames = []
+
+                for index, tup in enumerate(group):
+                    if tup is None and current_frames:
+                        consecutive_hidden_frames += 1
+                    else:
+                        consecutive_hidden_frames = 0
+                    if current_frames or tup:
+                        current_frames.append(tup)
+                    else:
+                        current_frame_start = index + 1
+                    if consecutive_hidden_frames >= 4:
+                        # Break
+                        maybe_add_frames()
+                        current_frame_start = index + 1
+                # Add the last group of frames if found
+                maybe_add_frames()
+        else:
+            # Create dummy groups so we can share code between animation and images
+            for i in range(len(isolated_detail_masks)):
+                for box, mask in zip(isolated_bounding_boxes[i], isolated_detail_masks[i]):
+                    # See if we can merge this box/mask
+                    merged = False
+                    for j, (index, other_box, other_mask) in enumerate(frame_box_mask_groups):
+                        overlap = self.find_overlap(box, other_box)
+                        if overlap:
+                            (x00, y00), (x01, y01) = box
+                            (x10, y10), (x11, y11) = other_box
+                            (ox0, oy0), (ox1, oy1) = overlap
+                            overlap_area = (ox1 - ox0) * (oy1 - oy0)
+                            box_area = (x01 - x00) * (y01 - y00)
+                            other_box_area = (x11 - x10) * (y11 - y10)
+                            if overlap_area > min(box_area, other_box_area) * 0.33:
+                                merged = True
+                                new_bbox = [(min(x00, x10), min(y00, y10)), (max(x01, x11), max(y01, y11))]
+                                white = Image.new(other_mask.mode, other_mask.size, (255,) if other_mask.mode == "L" else (255,255,255))
+                                other_mask.paste(white, mask=mask)
+                                frame_box_mask_groups[j] = (index, new_bbox, other_mask)
+                    if not merged:
+                        frame_box_mask_groups.append((i, box, mask))
+
+        # Perform detail passes
+        total_detail_passes = len(frame_box_mask_groups)
+        for i, (frame_start_index, bounding_box, mask) in enumerate(frame_box_mask_groups):
+            if nsfw[frame_start_index]:
+                continue
+
+            if isinstance(mask, list):
+                mask_max, mask_min = -1, -1
+                for mask_img in mask:
+                    mask_img_max, mask_img_min = mask_img.getextrema()
+                    mask_max = mask_img_max if mask_max == -1 else max(mask_img_max, mask_max)
+                    mask_min = mask_img_min if mask_min == -1 else min(mask_img_min, mask_min)
+            else:
+                mask_max, mask_min = mask.getextrema()
+
+            if mask_max == mask_min == 0:
+                logger.debug(f"No detailable areas found in pass {i+1}, skipping.")
+                continue
+
+            if task_callback is not None:
+                task_callback(f"Detailing pass {i+1}/{total_detail_passes}")
+
+            (x0, y0), (x1, y1) = bounding_box
+            extend_up = (y1 - y0) // 3
+            dilate_amount = max(self.detailer_inpaint_feather, int(self.detailer_inpaint_dilate_ratio * max((x1 - x0), (y1 - y0))))
+            y0 = max(y0 - extend_up, 0)
+
+            """
+            x0 = max(x0 - dilate_amount // 2, 0)
+            y0 = max(y0 - dilate_amount // 2, 0)
+            x1 = max(x1 + dilate_amount // 2, width - 1)
+            y1 = max(y1 + dilate_amount // 2, height - 1)
+            """
+
+            if isinstance(mask, list):
+                isolated_mask = [
+                    dilate_erode(
+                        self.extend_mask(mask_img, extend_up),
+                        dilate_amount
+                    )
+                    for mask_img in mask
+                ]
+            else:
+                mask.save("./before.png")
+                isolated_mask = dilate_erode(
+                    self.extend_mask(mask, extend_up),
+                    dilate_amount
+                )
+                isolated_mask.save("./after.png")
+
+            isolated_control_images = None
+            if len(control_images) > frame_start_index:
+                isolated_control_images = control_images
+                if not isinstance(mask, list):
+                    isolated_control_images = isolated_control_images[0]
+                else:
+                    controlnet_name = next(isolated_control_images[0].keys())
+                    scale = isolated_control_images[0][controlnet_name][1]
+                    controlnet_images = []
+
+                    for controlnet_dict in isolated_control_images:
+                        controlnet_images.append(controlnet_dict[controlnet_name][0])
+
+                    isolated_control_images = dict([
+                        (controlnet_name, (controlnet_images, scale))
+                    ])
+
+            if isinstance(isolated_mask, list):
+                isolated_image = [
+                    img.crop((x0, y0, x1, y1))
+                    for img in images
+                ]
+            else:
+                isolated_image = images[frame_start_index].crop((x0, y0, x1, y1))
+            isolated_image.save("./iso.png")
+            if isinstance(isolated_mask, list):
+                isolated_mask = [
+                    mask_img.crop((x0, y0, x1, y1))
+                    for mask_img in isolated_mask
+                ]
+                isolated_mask = (
+                    ([Image.new("L", isolated_mask[0].size)] * frame_start_index) +
+                    isolated_mask +
+                    ([Image.new("L", isolated_mask[0].size)] * (len(images) - len(isolated_mask) - frame_start_index))
+                )
+            else:
+                isolated_mask = isolated_mask.crop((x0, y0, x1, y1))
+
+            if isolated_control_images:
+                for controlnet_name in isolated_control_images:
+                    isolated_control_images[controlnet_name] = [
+                        (image.crop((x0, y0, x1, y1)), scale)
+                        for (image, scale) in isolated_control_images[controlnet_name]
+                    ]
+
+            original_width = x1 - x0
+            original_height = y1 - y0
+            inference_width = original_width
+            inference_height = original_height
+
+            scale_factor = (inpaint_size / max(original_width, original_height)) + self.detailer_upscale_amount
+
+            if scale_factor > 1:
+                inference_width *= scale_factor
+                inference_height *= scale_factor
+                inference_width = int((inference_width // 8) * 8)
+                inference_height = int((inference_height // 8) * 8)
+
+                if isinstance(isolated_image, list):
+                    isolated_image = [
+                        img.resize((inference_width, inference_height), Image.LANCZOS)
+                        for img in isolated_image
                     ]
                 else:
-                    control_images = [
-                        dict([ # type: ignore[misc]
-                            (self.detailer_controlnet, [(processed_image, self.detailer_controlnet_scale)])
-                        ])
-                        for processed_image in processed_control_images
-                    ]
+                    isolated_image = isolated_image.resize((inference_width, inference_height), Image.LANCZOS)
 
-        if (self.detailer_face_inpaint or self.detailer_hand_inpaint) and self.detailer_inpaint_strength:
-            # Face and/or hand fix pass
-            for i, image in enumerate([images] if self.animation_frames else images):
-                if nsfw[i]:
-                    continue
-                
-                if task_callback is not None:
-                    task_callback(f"Detailing sample {i+1}")
-
-                pipeline.stop_keepalive()
-                mask_max, mask_min = detail_masks[i].getextrema()
-                if mask_max == mask_min == 0:
-                    logger.debug("No detailable areas found, skipping.")
-                    continue
-                if isinstance(image, list):
-                    width, height = image[0].size
-                    mask = [
-                        dilate_erode(detail_mask, self.detailer_inpaint_dilate)
-                        for detail_mask in detail_masks
+                if isinstance(isolated_mask, list):
+                    isolated_mask = [
+                        mask_img.resize((inference_width, inference_height), Image.NEAREST)
+                        for mask_img in isolated_mask
                     ]
                 else:
-                    mask = dilate_erode(detail_masks[i], self.detailer_inpaint_dilate)
-                    width, height = image.size
+                    isolated_mask = isolated_mask.resize((inference_width, inference_height), Image.NEAREST)
 
-                detail_kwargs = {
-                    "width": width,
-                    "height": height,
-                    "image": image,
-                    "mask": mask,
-                    "prompt": prompt,
-                    "prompt_2": prompt_2,
-                    "negative_prompt": negative_prompt,
-                    "negative_prompt_2": negative_prompt_2,
-                    "prompts": self.prompts if self.prompts and len(self.prompts) > 1 else None,
-                    "control_images": None if len(control_images) <= i else control_images[i],
-                    "generator": pipeline.generator,
-                    "device": pipeline.device,
-                    "offload_models": pipeline.pipeline_sequential_onload,
-                    "strength": self.detailer_inpaint_strength,
-                    "num_results_per_prompt": 1,
-                    "progress_callback": progress_callback,
-                    "guidance_scale": guidance_scale,
-                    "num_inference_steps": num_inference_steps,
-                    "animation_frames": self.animation_frames,
-                    "frame_window_size": self.frame_window_size,
-                    "frame_window_stride": self.frame_window_stride
-                }
+                if isolated_control_images is not None:
+                    for controlnet_name in isolated_control_images:
+                        isolated_control_images[controlnet_name] = [
+                            (image.resize((inference_width, inference_height), Image.LANCZOS), scale)
+                            for (image, scale) in isolated_control_images[controlnet_name]
+                        ]
 
-                # If the pipeline has an IP adapter, pass the image through that
-                if detail_pipeline.ip_adapter_loaded:
-                    logger.debug(f"Detail pipeline has IP adapter loaded, adding image to adapter input.")
-                    detail_kwargs["ip_adapter_images"] = [(image, 1.0)]
+            detail_kwargs = {
+                "width": inference_width,
+                "height": inference_height,
+                "image": isolated_image,
+                "mask": isolated_mask,
+                "prompt": prompt,
+                "prompt_2": prompt_2,
+                "negative_prompt": negative_prompt,
+                "negative_prompt_2": negative_prompt_2,
+                "prompts": self.prompts if self.prompts and len(self.prompts) > 1 else None,
+                "control_images": isolated_control_images,
+                "generator": pipeline.generator,
+                "noise_generator": pipeline.noise_generator,
+                "device": pipeline.device,
+                "offload_models": pipeline.pipeline_sequential_onload,
+                "strength": self.detailer_inpaint_strength,
+                "num_results_per_prompt": 1,
+                "progress_callback": progress_callback,
+                "guidance_scale": guidance_scale,
+                "num_inference_steps": num_inference_steps,
+                "animation_frames": None if not isinstance(isolated_image, list) else len(isolated_image),
+                "frame_window_size": self.frame_window_size,
+                "frame_window_stride": self.frame_window_stride,
+                "motion_scale": invocation_kwargs.get("motion_scale", None),
+                "loop": invocation_kwargs.get("loop", False),
+                "progress_callback": progress_callback,
+                "latent_callback_type": "pil",
+            }
 
-                logger.debug(f"Detailing sample {i} with arguments {detail_kwargs}")
+            # If the pipeline has an IP adapter, pass the image through that
+            if detail_pipeline.ip_adapter_loaded:
+                # Extend the image crop up and to the sides to get hair for face ID
+                ix0 = max(x0 - 16, 0)
+                ix1 = min(x1 + 16, width-1)
+                iy0 = max(y0 - 32, 0)
+                iy1 = min(y1 + 8, height-1)
+                ip_adapter_image = image.crop((ix0, iy0, ix1, iy1))
+                ip_adapter_image.save("./ip-adapter.png")
+                logger.debug(f"Detail pipeline has IP adapter loaded, adding image to adapter input.")
+                detail_kwargs["ip_adapter_images"] = [(ip_adapter_image, self.detailer_inpaint_ip_adapter_scale)]
 
-                result = detail_pipeline(**detail_kwargs)["images"] # type: ignore
+            inpaint_image_callback = None
+            if image_callback is not None and image_callback_steps:
+                # Create resized callback
+                def resized_callback(inference_images: List[Image]) -> None:
+                    """
+                    Paste the images then callback.
+                    """
+                    callback_images = [image.copy() for image in images]
+                    for j, result in enumerate(inference_images):
+                        callback_images[j] = self.paste_inpaint_image(
+                            callback_images[j],
+                            result.resize((original_width, original_height), Image.NEAREST),
+                            (x0, y0, x1, y1),
+                            inpaint_feather=self.detailer_inpaint_feather
+                        )
+                    image_callback(callback_images) # type: ignore
 
-                if self.animation_frames:
-                    images = result # type: ignore[assignment]
-                else:
-                    images[i] = result[0] # type: ignore[index]
+                inpaint_image_callback = resized_callback
 
-                if image_callback is not None:
-                    image_callback(images)
+            logger.debug(f"Detailing pass {i} with arguments {detail_kwargs}")
+            pipeline.stop_keepalive()
+            results = detail_pipeline( # type: ignore
+                latent_callback=inpaint_image_callback,
+                latent_callback_steps=image_callback_steps,
+                **detail_kwargs
+            )["images"] # type: ignore
 
-        if self.detailer_controlnet and self.detailer_controlnet_scale:
-            with pipeline.control_image_processor.processor(self.detailer_controlnet) as process:
-                processed_control_images = []
-                for i, image in enumerate(images):
-                    processed_control_images.append(process(image))
-                if self.animation_frames:
-                    control_images = [
-                        dict([
-                            (self.detailer_controlnet, [(processed_control_images, self.detailer_controlnet_scale)])
-                        ])
-                    ]
-                else:
-                    control_images = [
-                        dict([ # type: ignore[misc]
-                            (self.detailer_controlnet, [(processed_image, self.detailer_controlnet_scale)])
-                        ])
-                        for processed_image in processed_control_images
-                    ]
+            for j, result in enumerate(results):
+                images[frame_start_index+j] = self.paste_inpaint_image(
+                    images[frame_start_index+j],
+                    result.resize((original_width, original_height), Image.NEAREST),
+                    (x0, y0, x1, y1),
+                    inpaint_feather=self.detailer_inpaint_feather
+                )
 
-        if self.detailer_denoising_strength:
-            # Final denoise pass
-            if use_inpainter:
-                # Need to tell the pipeline about detailer controlnets
-                if self.detailer_controlnet:
-                    pipeline.controlnets = self.detailer_controlnet # type: ignore[assignment]
-                else:
-                    pipeline.controlnets = None # type: ignore[assignment]
-            for i, image in enumerate([images] if self.animation_frames else images):
-                if nsfw[i]:
-                    continue
-                if task_callback:
-                    task_callback(f"Finishing sample {i+1}")
-
-                pipeline.stop_keepalive()
-                if isinstance(image, list):
-                    width, height = image[0].size
-                else:
-                    width, height = image.size
-
-                result = pipeline(
-                    width=width,
-                    height=height,
-                    image=image,
-                    strength=self.detailer_denoising_strength,
-                    prompt=prompt,
-                    prompt_2=prompt_2,
-                    negative_prompt=negative_prompt,
-                    negative_prompt_2=negative_prompt_2,
-                    prompts=self.prompts if self.prompts and len(self.prompts) > 1 else None,
-                    control_images=None if len(control_images) <= i else control_images[i],
-                    num_results_per_prompt=1,
-                    progress_callback=progress_callback,
-                    guidance_scale=guidance_scale,
-                    num_inference_steps=num_inference_steps,
-                    animation_frames=self.animation_frames,
-                    frame_window_size=self.frame_window_size,
-                    frame_window_stride=self.frame_window_stride,
-                )["images"]
-
-                if self.animation_frames:
-                    images = result
-                else:
-                    images[i] = result[0]
+            if image_callback is not None:
+                image_callback(images)
 
         return images, nsfw
 
@@ -2218,8 +2581,11 @@ class LayeredInvocation:
                                 return upscale( # type: ignore[call-arg]
                                     image,
                                     outscale=amount,
-                                    tile_diffusion_size=None if not tiling_unet else 512,
                                     tile_diffusion_stride=256,
+                                    tile_diffusion_size=None if not tiling_unet else 512,
+                                    tile_vae_encode_size=None if not tiling_vae else 512,
+                                    tile_vae_decode_size=None if not tiling_vae else 128,
+                                    progress_callback=progress_callback,
                                 )
                             yield execute_upscale
                     elif method == "gfpgan":
@@ -2260,6 +2626,8 @@ class LayeredInvocation:
                     if nsfw is not None and nsfw[i]:
                         continue
                     logger.debug(f"Upscaling sample {i} by {amount} using {method}")
+                    if method == "ccsr" and task_callback:
+                        task_callback(f"Upscaling sample {i+1}")
                     images[i] = upscale_image(image)
                     upscale_time = max((datetime.now() - upscale_start).total_seconds(), 1e-5)
                     if progress_callback:

@@ -49,17 +49,6 @@ class DetailingFormView extends FormView {
                     "tooltip": "The strength of the face and/or hand fix denoising pass. Higher values will change the face more from the initial generation."
                 }
             },
-            "detailStrength": {
-                "label": "Detailer Denoising Strength",
-                "class": SliderPreciseInputView,
-                "config": {
-                    "min": 0.0,
-                    "max": 1.0,
-                    "value": 0.0,
-                    "step": 0.01,
-                    "tooltip": "When this value is greater than 0, a final detailer pass will be performed on the image with this denoising strength after inpainting faces/hands."
-                }
-            },
             "detailControlnet": {
                 "label": "Detailer ControlNet",
                 "class": UpscaleDiffusionControlnetInputView,

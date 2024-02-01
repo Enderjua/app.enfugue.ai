@@ -212,6 +212,7 @@ class OpenposeDetector:
         include_face=False,
         hand_and_face=None,
         draw_type="pose",
+        isolated=False,
         **kwargs
     ):
         if not isinstance(input_image, np.ndarray):
@@ -221,25 +222,73 @@ class OpenposeDetector:
         input_image = resize_image(input_image, detect_resolution)
         H, W, C = input_image.shape
 
+        output_img = resize_image(input_image, image_resolution)
+        oH, oW, oC = output_img.shape
+
         poses = self.detect_poses(input_image, include_hand, include_face)
 
-        canvas = draw_poses(
-            poses,
-            H,
-            W,
-            draw_body=include_body,
-            draw_hand=include_hand,
-            draw_face=include_face,
-            draw_type=draw_type,
-        )
+        min_sum = 3 * 255 * 12
 
-        detected_map = canvas
-        detected_map = HWC3(detected_map)
+        if isolated:
+            all_masks = []
+            for pose in poses:
+                these_masks = []
+                if include_body:
+                    canvas = draw_poses(
+                        [pose],
+                        H,
+                        W,
+                        draw_body=True,
+                        draw_hand=False,
+                        draw_face=False,
+                        draw_type=draw_type,
+                    )
+                    if np.sum(canvas) > min_sum:
+                        these_masks.append(canvas)
+                if include_hand:
+                    canvas = draw_poses(
+                        [pose],
+                        H,
+                        W,
+                        draw_body=False,
+                        draw_hand=True,
+                        draw_face=False,
+                        draw_type=draw_type,
+                    )
+                    if np.sum(canvas) > min_sum:
+                        these_masks.append(canvas)
+                if include_face:
+                    canvas = draw_poses(
+                        [pose],
+                        H,
+                        W,
+                        draw_body=False,
+                        draw_hand=False,
+                        draw_face=True,
+                        draw_type=draw_type,
+                    )
+                    if np.sum(canvas) > min_sum:
+                        these_masks.append(canvas)
+                all_masks.extend(these_masks)
+            for i, detected_map in enumerate(all_masks):
+                detected_map = HWC3(detected_map)
+                detected_map = cv2.resize(detected_map, (oW, oH), interpolation=cv2.INTER_LINEAR)
+                all_masks[i] = Image.fromarray(detected_map)
+            return all_masks
+        else:
+            canvas = draw_poses(
+                poses,
+                H,
+                W,
+                draw_body=include_body,
+                draw_hand=include_hand,
+                draw_face=include_face,
+                draw_type=draw_type,
+            )
 
-        img = resize_image(input_image, image_resolution)
-        H, W, C = img.shape
+            detected_map = canvas
+            detected_map = HWC3(detected_map)
+            detected_map = cv2.resize(detected_map, (oW, oH), interpolation=cv2.INTER_LINEAR)
+            detected_map = Image.fromarray(detected_map)
 
-        detected_map = cv2.resize(detected_map, (W, H), interpolation=cv2.INTER_LINEAR)
-        detected_map = Image.fromarray(detected_map)
-
-        return detected_map
+            return detected_map

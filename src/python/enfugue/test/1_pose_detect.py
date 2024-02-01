@@ -27,7 +27,6 @@ def main() -> None:
         ]
         manager = DiffusionPipelineManager()
         controlnets = ["openpose", "dwpose"]
-
         with manager.control_image_processor.pose_detector.openpose() as openpose:
             for i, image in enumerate(images):
                 image.save(os.path.join(save_dir, f"base-{i}.png"))
@@ -35,7 +34,9 @@ def main() -> None:
                 openpose(image).save(os.path.join(save_dir, f"detect-openpose-{i}.png"))
                 openpose_time = (datetime.now() - start_openpose).total_seconds()
                 logger.info(f"Openpose took {openpose_time:0.03f}")
-                openpose.detail_mask(image).save(os.path.join(save_dir, f"detect-openpose-detail-{i}.png"))
+                masks = openpose.detail_mask(image, isolated=True)
+                for j, mask in enumerate(masks):
+                    mask.save(os.path.join(save_dir, f"detect-openpose-detail-{i}-mask-{j}.png"))
         try:
             with manager.control_image_processor.pose_detector.dwpose() as dwpose:
                 for i, image in enumerate(images):
@@ -43,8 +44,13 @@ def main() -> None:
                     dwpose(image).save(os.path.join(save_dir, f"detect-dwpose-{i}.png"))
                     dwpose_time = (datetime.now() - start_dwpose).total_seconds()
                     logger.info(f"dwpose took {dwpose_time:0.03f}")
-                    dwpose.detail_mask(image).save(os.path.join(save_dir, f"detect-dwpose-detail-{i}.png"))
+                    masks = dwpose.detail_mask(image, isolated=True)
+                    for j, mask in enumerate(masks):
+                        mask.save(os.path.join(save_dir, f"detect-dwpose-detail-{i}-mask-{j}.png"))
+
         except Exception as ex:
+            import traceback
+            traceback.print_exc()
             logger.warning(f"Received exception using DWPose: {type(ex).__name__}({ex})")
 
 if __name__ == "__main__":

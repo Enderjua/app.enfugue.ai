@@ -40,6 +40,7 @@ class UpscaleMethodInputView extends SelectInputView {
         "esrgan": "ESRGAN",
         "esrganime": "ESRGANime",
         "gfpgan": "GFPGAN",
+        "ccsr": "CCSR",
         "lanczos": "Lanczos",
         "bicubic": "Bicubic",
         "bilinear": "Bilinear",

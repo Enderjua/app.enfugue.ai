@@ -509,7 +509,7 @@ class Encoder(nn.Module):
                                         stride=1,
                                         padding=1)
 
-    def forward(self, x):
+    def forward(self, x, step_complete=None):
         # timestep embedding
         temb = None
 
@@ -534,6 +534,8 @@ class Encoder(nn.Module):
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
+        if step_complete is not None:
+            step_complete(True)
         return h
 
 
@@ -608,7 +610,7 @@ class Decoder(nn.Module):
                                         stride=1,
                                         padding=1)
 
-    def forward(self, z):
+    def forward(self, z, step_complete=None):
         #assert z.shape[1:] == self.z_shape[1:]
         self.last_z_shape = z.shape
 
@@ -641,6 +643,8 @@ class Decoder(nn.Module):
         h = self.conv_out(h)
         if self.tanh_out:
             h = torch.tanh(h)
+        if step_complete is not None:
+            step_complete(True)
         return h
 
 

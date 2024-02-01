@@ -27,10 +27,12 @@ class FaceAnalyzerImageProcessor:
         Runs the detector.
         """
         import torch
+        from enfugue.util.log import logger
         from enfugue.diffusion.util import ComputerVision
         image = ComputerVision.convert_image(image)
         faces = self.analyzer.get(image)
         if not faces:
+            logger.warning("Could not detect any faces in passed image.")
             return None
         return torch.from_numpy(faces[0].normed_embedding).unsqueeze(0)
 

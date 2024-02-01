@@ -39,7 +39,6 @@ def draw_pose(pose, H, W, draw_type="pose"):
 
     return canvas
 
-
 class DWposeDetector:
     def __init__(
         self,
@@ -66,6 +65,7 @@ class DWposeDetector:
         image_resolution=512,
         output_type="pil",
         draw_type="pose",
+        isolated=False,
         **kwargs
     ):
         input_image = cv2.cvtColor(
@@ -75,6 +75,9 @@ class DWposeDetector:
         input_image = HWC3(input_image)
         input_image = resize_image(input_image, detect_resolution)
         H, W, C = input_image.shape
+        output_img = resize_image(input_image, image_resolution)
+        oH, oW, oC = output_img.shape
+        min_sum = 3 * 255 * 128
 
         with torch.no_grad():
             candidate, subset = self.pose_estimation(input_image)
@@ -105,17 +108,42 @@ class DWposeDetector:
             bodies = dict(candidate=body, subset=score)
             pose = dict(bodies=bodies, hands=hands, faces=faces)
 
-            detected_map = draw_pose(pose, H, W, draw_type)
-            detected_map = HWC3(detected_map)
+            if isolated:
+                all_maps = []
+                for key in ["bodies", "hands", "faces"]:
+                    if (key == "bodies" and pose[key]["subset"].any()) or (key != "bodies" and pose[key].any()):
+                        these_maps = []
+                        this_pose = {"bodies": {"candidate": pose["bodies"]["candidate"], "subset": []}, "hands": [], "faces": []}
+                        if key == "bodies":
+                            parts = pose[key]["subset"]
+                        else:
+                            parts = pose[key]
+                        for j, part in enumerate(parts):
+                            if key == "bodies":
+                                this_pose[key]["subset"] = [part]
+                            else:
+                                this_pose[key] = [part]
+                            detected_map = draw_pose(this_pose, H, W, draw_type)
+                            if np.sum(detected_map) > min_sum:
+                                these_maps.append(detected_map)
+                        all_maps.extend(these_maps)
+                for j, detected_map in enumerate(all_maps):
+                    detected_map = HWC3(detected_map)
+                    detected_map = cv2.resize(
+                        detected_map, (oW, oH), interpolation=cv2.INTER_LINEAR
+                    )
+                    if output_type == "pil":
+                        detected_map = Image.fromarray(detected_map)
+                    all_maps[j] = detected_map
 
-            img = resize_image(input_image, image_resolution)
-            H, W, C = img.shape
+                return all_maps
+            else:
+                detected_map = draw_pose(pose, H, W, draw_type)
+                detected_map = HWC3(detected_map)
+                detected_map = cv2.resize(
+                    detected_map, (oW, oH), interpolation=cv2.INTER_LINEAR
+                )
+                if output_type == "pil":
+                    detected_map = Image.fromarray(detected_map)
 
-            detected_map = cv2.resize(
-                detected_map, (W, H), interpolation=cv2.INTER_LINEAR
-            )
-
-            if output_type == "pil":
-                detected_map = Image.fromarray(detected_map)
-
-            return detected_map
+                return detected_map

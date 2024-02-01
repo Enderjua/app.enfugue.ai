@@ -4,7 +4,6 @@ from typing import Optional, Tuple, Dict, List, Callable
 
 import torch
 import numpy as np
-from tqdm import tqdm
 import einops
 import os
 from PIL import Image
@@ -468,37 +467,49 @@ class SpacedSampler:
 
         return x_prev
 
+    @classmethod
+    def get_sliding_windows(
+        cls,
+        height: int,
+        width: int,
+        tile_size: int,
+        tile_stride: int
+    ) -> List[Tuple[int, int, int, int]]:
+        height_list = list(range(0, height - tile_size + 1, tile_stride))
+        if (height - tile_size) % tile_stride != 0:
+            height_list.append(height - tile_size)
+
+        width_list = list(range(0, width - tile_size + 1, tile_stride))
+        if (width - tile_size) % tile_stride != 0:
+            width_list.append(width - tile_size)
+
+        coords = []
+        for height in height_list:
+            for width in width_list:
+                coords.append((height, height + tile_size, width, width + tile_size))
+        return coords
+
     @torch.no_grad()
     def sample_with_tile_ccsr(
-            self,
-            tile_size: int,
-            tile_stride: int,
-            steps: int,
-            t_max: float,
-            t_min: float,
-            shape: Tuple[int],
-            cond_img: torch.Tensor,
-            positive_prompt: str,
-            negative_prompt: str,
-            x_T: Optional[torch.Tensor] = None,
-            cfg_scale: float = 1.,
-            color_fix_type: str = "none"
+        self,
+        tile_size: int,
+        tile_stride: int,
+        steps: int,
+        t_max: float,
+        t_min: float,
+        shape: Tuple[int],
+        cond_img: torch.Tensor,
+        positive_prompt: str,
+        negative_prompt: str,
+        x_T: Optional[torch.Tensor] = None,
+        cfg_scale: float = 1.,
+        color_fix_type: str = "none",
+        step_complete: Optional[Callable[[bool], None]] = None
     ) -> torch.Tensor:
-        def _sliding_windows(h: int, w: int, tile_size: int, tile_stride: int) -> Tuple[int, int, int, int]:
-            hi_list = list(range(0, h - tile_size + 1, tile_stride))
-            if (h - tile_size) % tile_stride != 0:
-                hi_list.append(h - tile_size)
-
-            wi_list = list(range(0, w - tile_size + 1, tile_stride))
-            if (w - tile_size) % tile_stride != 0:
-                wi_list.append(w - tile_size)
-
-            coords = []
-            for hi in hi_list:
-                for wi in wi_list:
-                    coords.append((hi, hi + tile_size, wi, wi + tile_size))
-            return coords
-
+        """
+        Samples in a tiled manner
+        """
+        from enfugue.util import logger
         def gaussian_weights(tile_width: int, tile_height: int, nbatches: int) -> torch.Tensor:
             """Generates a gaussian mask of weights for tile contributions"""
             from numpy import pi, exp, sqrt
@@ -533,8 +544,6 @@ class SpacedSampler:
         # timesteps iterator
         time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
         total_steps = len(self.timesteps)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
         # q_sample for the start
         ts = torch.full((b,), time_range[0], device=device, dtype=torch.long)
         index = torch.full_like(ts, fill_value=total_steps - 1)
@@ -547,9 +556,8 @@ class SpacedSampler:
         count = torch.zeros_like(img)
 
         # predict noise for each tile
-        tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
+        tiles_iterator = self.get_sliding_windows(h, w, tile_size // 8, tile_stride // 8)
         for hi, hi_end, wi, wi_end in tiles_iterator:
-            tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
             # noisy latent of this diffusion process (tile) at this step
             tile_img = img[:, :, hi:hi_end, wi:wi_end]
             # prepare condition for this tile
@@ -569,6 +577,8 @@ class SpacedSampler:
             # accumulate noise
             noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise * tile_weights
             count[:, :, hi:hi_end, wi:wi_end] += tile_weights
+            if step_complete is not None:
+                step_complete(True)
 
         # fuse by tile_weights on noise (score)
         noise_buffer /= count
@@ -584,18 +594,16 @@ class SpacedSampler:
         time_range = time_range[-int(round(total_steps * t_max)):]
         total_steps_use = len(time_range)
         time_range = time_range[:-int(round(total_steps * t_min))]
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
 
         # sampling loop
-        for i, step in enumerate(iterator):
+        for i, step in enumerate(time_range):
 
             ts = torch.full((b,), step, device=device, dtype=torch.long)
             index = torch.full_like(ts, fill_value=total_steps_use - i - 1)
 
             # predict noise for each tile
-            tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
+            tiles_iterator = self.get_sliding_windows(h, w, tile_size // 8, tile_stride // 8)
             for hi, hi_end, wi, wi_end in tiles_iterator:
-                tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
                 # noisy latent of this diffusion process (tile) at this step
                 tile_img = img[:, :, hi:hi_end, wi:wi_end]
                 # prepare condition for this tile
@@ -605,7 +613,7 @@ class SpacedSampler:
                     "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
                 }
                 tile_uncond = {
-                    "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
+                    "c_latent": [tile_cond["c_latent"][0].clone()],
                     "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
                 }
                 # predict noise for this tile
@@ -614,6 +622,9 @@ class SpacedSampler:
                 # accumulate noise
                 noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise * tile_weights
                 count[:, :, hi:hi_end, wi:wi_end] += tile_weights
+
+                if step_complete is not None:
+                    step_complete(True)
 
             # average on noise (score)
             noise_buffer /= count
@@ -637,7 +648,7 @@ class SpacedSampler:
             count.zero_()
 
         img = pred_x0
-        img_pixel = (self.model.decode_first_stage(img) + 1) / 2
+        img_pixel = (self.model.decode_first_stage(img, step_complete=step_complete) + 1) / 2
         # apply color correction (borrowed from StableSR)
         if color_fix_type == "adain":
             img_pixel = adaptive_instance_normalization(img_pixel, cond_img)
@@ -648,347 +659,19 @@ class SpacedSampler:
         return img_pixel
 
     @torch.no_grad()
-    def sample_with_mixdiff_ccsr(
-            self,
-            tile_size: int,
-            tile_stride: int,
-            steps: int,
-            t_max: float,
-            t_min: float,
-            shape: Tuple[int],
-            cond_img: torch.Tensor,
-            positive_prompt: str,
-            negative_prompt: str,
-            x_T: Optional[torch.Tensor] = None,
-            cfg_scale: float = 1.,
-            color_fix_type: str = "none"
-    ) -> torch.Tensor:
-        def _sliding_windows(h: int, w: int, tile_size: int, tile_stride: int) -> Tuple[int, int, int, int]:
-            hi_list = list(range(0, h - tile_size + 1, tile_stride))
-            if (h - tile_size) % tile_stride != 0:
-                hi_list.append(h - tile_size)
-
-            wi_list = list(range(0, w - tile_size + 1, tile_stride))
-            if (w - tile_size) % tile_stride != 0:
-                wi_list.append(w - tile_size)
-
-            coords = []
-            for hi in hi_list:
-                for wi in wi_list:
-                    coords.append((hi, hi + tile_size, wi, wi + tile_size))
-            return coords
-
-        # make sampling parameters (e.g. sigmas)
-        self.make_schedule(num_steps=steps)
-
-        device = next(self.model.parameters()).device
-        b, _, h, w = shape
-        if x_T is None:
-            img = torch.randn(shape, dtype=torch.float32, device=device)
-        else:
-            img = x_T
-        # create buffers for accumulating predicted noise of different diffusion process
-        noise_buffer = torch.zeros_like(img)
-        count = torch.zeros(shape, dtype=torch.long, device=device)
-        # timesteps iterator
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(self.timesteps)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        # q_sample for the start
-        ts = torch.full((b,), time_range[0], device=device, dtype=torch.long)
-        index = torch.full_like(ts, fill_value=total_steps - 1)
-
-        # predict noise for each tile
-        tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
-        for hi, hi_end, wi, wi_end in tiles_iterator:
-            tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
-            # noisy latent of this diffusion process (tile) at this step
-            tile_img = img[:, :, hi:hi_end, wi:wi_end]
-            # prepare condition for this tile
-            tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-            tile_cond = {
-                "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
-            }
-            tile_uncond = {
-                "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
-            }
-            # predict noise for this tile
-            tile_noise = self.predict_noise(tile_img, ts, tile_cond, cfg_scale, tile_uncond)
-
-            # accumulate noise
-            noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise
-            count[:, :, hi:hi_end, wi:wi_end] += 1
-
-        # average on noise (score)
-        noise_buffer.div_(count)
-        pred_x0 = self._predict_xstart_from_eps(x_t=img, t=index, eps=noise_buffer)
-        tao_index = torch.tensor(torch.round(index * t_max), dtype=torch.int64)
-        img = self.q_sample(pred_x0, tao_index)
-
-        noise_buffer.zero_()
-        count.zero_()
-
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(time_range)
-        time_range = time_range[-int(round(total_steps * t_max)):]
-        total_steps_use = len(time_range)
-        time_range = time_range[:-int(round(total_steps * t_min))]
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        # sampling loop
-        for i, step in enumerate(iterator):
-
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
-            index = torch.full_like(ts, fill_value=total_steps_use - i - 1)
-
-            # predict noise for each tile
-            tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
-            for hi, hi_end, wi, wi_end in tiles_iterator:
-                tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
-                # noisy latent of this diffusion process (tile) at this step
-                tile_img = img[:, :, hi:hi_end, wi:wi_end]
-                # prepare condition for this tile
-                tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-                tile_cond = {
-                    "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                    "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
-                }
-                tile_uncond = {
-                    "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                    "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
-                }
-
-                # predict noise for this tile
-                tile_noise = self.predict_noise(tile_img, ts, tile_cond, cfg_scale, tile_uncond)
-
-                # accumulate noise
-                noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise
-                count[:, :, hi:hi_end, wi:wi_end] += 1
-
-            # average on noise (score)
-            noise_buffer.div_(count)
-            # sample previous latent
-            pred_x0 = self._predict_xstart_from_eps(x_t=img, t=index, eps=noise_buffer)
-            mean, _, _ = self.q_posterior_mean_variance(
-                x_start=pred_x0, x_t=img, t=index
-            )
-            variance = {
-                "fixed_large": np.append(self.posterior_variance[1], self.betas[1:]),
-                "fixed_small": self.posterior_variance
-            }[self.var_type]
-            variance = _extract_into_tensor(variance, index, noise_buffer.shape)
-
-            nonzero_mask = (
-                (index != 0).float().view(-1, *([1] * (len(noise_buffer.shape) - 1)))
-            )
-            img = mean + nonzero_mask * torch.sqrt(variance) * torch.randn_like(mean)
-
-            noise_buffer.zero_()
-            count.zero_()
-
-        img = pred_x0
-        # decode samples of each diffusion process
-        img_buffer = torch.zeros_like(cond_img)
-        count = torch.zeros_like(cond_img, dtype=torch.long)
-        for hi, hi_end, wi, wi_end in _sliding_windows(h, w, tile_size // 8, tile_stride // 8):
-            tile_img = img[:, :, hi:hi_end, wi:wi_end]
-            tile_img_pixel = (self.model.decode_first_stage(tile_img) + 1) / 2
-            tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-            # apply color correction (borrowed from StableSR)
-            if color_fix_type == "adain":
-                tile_img_pixel = adaptive_instance_normalization(tile_img_pixel, tile_cond_img)
-            elif color_fix_type == "wavelet":
-                tile_img_pixel = wavelet_reconstruction(tile_img_pixel, tile_cond_img)
-            else:
-                assert color_fix_type == "none", f"unexpected color fix type: {color_fix_type}"
-            img_buffer[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8] += tile_img_pixel
-            count[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8] += 1
-        img_buffer.div_(count)
-
-        return img_buffer
-
-    @torch.no_grad()
-    def sample_with_mixdiff_control(
-            self,
-            control_imgs: torch.Tensor,
-            tile_size: int,
-            tile_stride: int,
-            steps: int,
-            tao_steps: int,
-            shape: Tuple[int],
-            cond_img: torch.Tensor,
-            positive_prompt: str,
-            negative_prompt: str,
-            x_T: Optional[torch.Tensor] = None,
-            cfg_scale: float = 1.,
-            color_fix_type: str = "none"
-    ) -> torch.Tensor:
-        def _sliding_windows(h: int, w: int, tile_size: int, tile_stride: int) -> Tuple[int, int, int, int]:
-            hi_list = list(range(0, h - tile_size + 1, tile_stride))
-            if (h - tile_size) % tile_stride != 0:
-                hi_list.append(h - tile_size)
-
-            wi_list = list(range(0, w - tile_size + 1, tile_stride))
-            if (w - tile_size) % tile_stride != 0:
-                wi_list.append(w - tile_size)
-
-            coords = []
-            for hi in hi_list:
-                for wi in wi_list:
-                    coords.append((hi, hi + tile_size, wi, wi + tile_size))
-            return coords
-
-        # make sampling parameters (e.g. sigmas)
-        self.make_schedule(num_steps=steps)
-
-        device = next(self.model.parameters()).device
-        b, _, h, w = shape
-        if x_T is None:
-            img = torch.randn(shape, dtype=torch.float32, device=device)
-        else:
-            img = x_T
-        # create buffers for accumulating predicted noise of different diffusion process
-        noise_buffer = torch.zeros_like(img)
-        count = torch.zeros(shape, dtype=torch.long, device=device)
-        # timesteps iterator
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(self.timesteps)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        # q_sample for the start
-        ts = torch.full((b,), time_range[0], device=device, dtype=torch.long)
-        index = torch.full_like(ts, fill_value=total_steps - 1)
-
-        # start point: LR
-        img = self.q_sample(control_imgs, index)
-
-        # predict noise for each tile
-        tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
-        for hi, hi_end, wi, wi_end in tiles_iterator:
-            tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
-            # noisy latent of this diffusion process (tile) at this step
-            tile_img = img[:, :, hi:hi_end, wi:wi_end]
-            # prepare condition for this tile
-            tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-            tile_cond = {
-                "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
-            }
-            tile_uncond = {
-                "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
-            }
-            # predict noise for this tile
-            tile_noise = self.predict_noise(tile_img, ts, tile_cond, cfg_scale, tile_uncond)
-
-            # accumulate noise
-            noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise
-            count[:, :, hi:hi_end, wi:wi_end] += 1
-
-        # average on noise (score)
-        noise_buffer.div_(count)
-        # sample previous latent
-        pred_x0 = self._predict_xstart_from_eps(x_t=img, t=index, eps=noise_buffer)
-        tao_index = index - index // (tao_steps - 1)
-        img = self.q_sample(pred_x0, tao_index)
-
-        noise_buffer.zero_()
-        count.zero_()
-
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(time_range)
-        time_range = time_range[total_steps // (tao_steps - 1):]
-        total_steps_use = len(time_range)
-        # time_range = time_range[:-total_steps//(tao_steps-1)]
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        # sampling loop
-        for i, step in enumerate(iterator):
-
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
-            index = torch.full_like(ts, fill_value=total_steps_use - i - 1)
-
-            # predict noise for each tile
-            tiles_iterator = tqdm(_sliding_windows(h, w, tile_size // 8, tile_stride // 8))
-            for hi, hi_end, wi, wi_end in tiles_iterator:
-                tiles_iterator.set_description(f"Process tile with location ({hi} {hi_end}) ({wi} {wi_end})")
-                # noisy latent of this diffusion process (tile) at this step
-                tile_img = img[:, :, hi:hi_end, wi:wi_end]
-                # prepare condition for this tile
-                tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-                tile_cond = {
-                    "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                    "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
-                }
-                tile_uncond = {
-                    "c_latent": [self.model.apply_condition_encoder(tile_cond_img)],
-                    "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
-                }
-                # predict noise for this tile
-                tile_noise = self.predict_noise(tile_img, ts, tile_cond, cfg_scale, tile_uncond)
-
-                # accumulate noise
-                noise_buffer[:, :, hi:hi_end, wi:wi_end] += tile_noise
-                count[:, :, hi:hi_end, wi:wi_end] += 1
-
-            # average on noise (score)
-            noise_buffer.div_(count)
-            # sample previous latent
-            pred_x0 = self._predict_xstart_from_eps(x_t=img, t=index, eps=noise_buffer)
-            mean, _, _ = self.q_posterior_mean_variance(
-                x_start=pred_x0, x_t=img, t=index
-            )
-            variance = {
-                "fixed_large": np.append(self.posterior_variance[1], self.betas[1:]),
-                "fixed_small": self.posterior_variance
-            }[self.var_type]
-            variance = _extract_into_tensor(variance, index, noise_buffer.shape)
-
-            nonzero_mask = (
-                (index != 0).float().view(-1, *([1] * (len(noise_buffer.shape) - 1)))
-            )
-            img = mean + nonzero_mask * torch.sqrt(variance) * torch.randn_like(mean)
-
-            noise_buffer.zero_()
-            count.zero_()
-
-        img = pred_x0
-        # decode samples of each diffusion process
-        img_buffer = torch.zeros_like(cond_img)
-        count = torch.zeros_like(cond_img, dtype=torch.long)
-        for hi, hi_end, wi, wi_end in _sliding_windows(h, w, tile_size // 8, tile_stride // 8):
-            tile_img = img[:, :, hi:hi_end, wi:wi_end]
-            tile_img_pixel = (self.model.decode_first_stage(tile_img) + 1) / 2
-            tile_cond_img = cond_img[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8]
-            # apply color correction (borrowed from StableSR)
-            if color_fix_type == "adain":
-                tile_img_pixel = adaptive_instance_normalization(tile_img_pixel, tile_cond_img)
-            elif color_fix_type == "wavelet":
-                tile_img_pixel = wavelet_reconstruction(tile_img_pixel, tile_cond_img)
-            else:
-                assert color_fix_type == "none", f"unexpected color fix type: {color_fix_type}"
-            img_buffer[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8] += tile_img_pixel
-            count[:, :, hi * 8:hi_end * 8, wi * 8: wi_end * 8] += 1
-        img_buffer.div_(count)
-
-        return img_buffer
-
-    @torch.no_grad()
     def sample_ccsr(
-            self,
-            steps: int,
-            t_max: float,
-            t_min: float,
-            shape: Tuple[int],
-            cond_img: torch.Tensor,
-            positive_prompt: str,
-            negative_prompt: str,
-            x_T: Optional[torch.Tensor] = None,
-            cfg_scale: float = 1.,
-            color_fix_type: str = "none"
+        self,
+        steps: int,
+        t_max: float,
+        t_min: float,
+        shape: Tuple[int],
+        cond_img: torch.Tensor,
+        positive_prompt: str,
+        negative_prompt: str,
+        x_T: Optional[torch.Tensor] = None,
+        cfg_scale: float = 1.,
+        color_fix_type: str = "none",
+        step_complete: Optional[Callable[[bool], None]] = None
     ) -> torch.Tensor:
         self.make_schedule(num_steps=steps)
         # self.make_tao_schedule(num_steps=tao_steps)
@@ -1002,14 +685,14 @@ class SpacedSampler:
 
         time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
         total_steps = len(self.timesteps)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
+        from enfugue.util import logger
 
         cond = {
             "c_latent": [self.model.apply_condition_encoder(cond_img)],
             "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
         }
         uncond = {
-            "c_latent": [self.model.apply_condition_encoder(cond_img)],
+            "c_latent": [cond["c_latent"][0].clone()],
             "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
         }
 
@@ -1026,86 +709,19 @@ class SpacedSampler:
         time_range = time_range[-int(round(total_steps * t_max)):]
         total_steps_use = len(time_range)
         time_range = time_range[:-int(round(total_steps * t_min))]
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
 
-        for i, step in enumerate(iterator):
+        for i, step in enumerate(time_range):
             ts = torch.full((b,), step, device=device, dtype=torch.long)
             index = torch.full_like(ts, fill_value=total_steps_use - i - 1)
             img, x0 = self.p_sample_x0(
                 img, cond, ts, index=index,
                 cfg_scale=cfg_scale, uncond=uncond
             )
+            if step_complete is not None:
+                step_complete(True)
 
         img = x0
-        img_pixel = (self.model.decode_first_stage(img) + 1) / 2
-        # apply color correction (borrowed from StableSR)
-        if color_fix_type == "adain":
-            img_pixel = adaptive_instance_normalization(img_pixel, cond_img)
-        elif color_fix_type == "wavelet":
-            img_pixel = wavelet_reconstruction(img_pixel, cond_img)
-        else:
-            assert color_fix_type == "none", f"unexpected color fix type: {color_fix_type}"
-        return img_pixel
-
-    @torch.no_grad()
-    def sample_ccsr_stage1(
-            self,
-            steps: int,
-            t_max: float,
-            shape: Tuple[int],
-            cond_img: torch.Tensor,
-            positive_prompt: str,
-            negative_prompt: str,
-            x_T: Optional[torch.Tensor] = None,
-            cfg_scale: float = 1.,
-            color_fix_type: str = "none"
-    ) -> torch.Tensor:
-        self.make_schedule(num_steps=steps)
-        # self.make_tao_schedule(num_steps=tao_steps)
-
-        device = next(self.model.parameters()).device
-        b = shape[0]
-        if x_T is None:
-            img = torch.randn(shape, device=device)
-        else:
-            img = x_T
-
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(self.timesteps)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        cond = {
-            "c_latent": [self.model.apply_condition_encoder(cond_img)],
-            "c_crossattn": [self.model.get_learned_conditioning([positive_prompt] * b)]
-        }
-        uncond = {
-            "c_latent": [self.model.apply_condition_encoder(cond_img)],
-            "c_crossattn": [self.model.get_learned_conditioning([negative_prompt] * b)]
-        }
-
-        # q_sample for the start
-        ts = torch.full((b,), time_range[0], device=device, dtype=torch.long)
-        index = torch.full_like(ts, fill_value=total_steps - 1)
-        img = self.p_sample_tao(
-            img, cond, ts, index=index, t_max=t_max,
-            cfg_scale=cfg_scale, uncond=uncond
-        )
-
-        time_range = np.flip(self.timesteps)  # [1000, 950, 900, ...]
-        total_steps = len(time_range)
-        time_range = time_range[-int(round(total_steps * t_max)):]
-        total_steps = len(time_range)
-        iterator = tqdm(time_range, desc="Spaced Sampler", total=total_steps)
-
-        for i, step in enumerate(iterator):
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
-            index = torch.full_like(ts, fill_value=total_steps - i - 1)
-            img = self.p_sample(
-                img, cond, ts, index=index,
-                cfg_scale=cfg_scale, uncond=uncond
-            )
-
-        img_pixel = (self.model.decode_first_stage(img) + 1) / 2
+        img_pixel = (self.model.decode_first_stage(img, step_complete=step_complete) + 1) / 2
         # apply color correction (borrowed from StableSR)
         if color_fix_type == "adain":
             img_pixel = adaptive_instance_normalization(img_pixel, cond_img)

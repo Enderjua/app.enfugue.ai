@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import TYPE_CHECKING, Optional, Iterator, Callable, Iterable, Literal, List, Union, Tuple
 from enfugue.util import logger, reiterator
 from pibble.util.helpers import OutputCatcher
@@ -30,12 +31,13 @@ class Video:
         self,
         frames: Iterable[Image],
         frame_rate: Optional[float]=None,
-        audio: Optional[Audio]=None,
+        audio: Optional[Union[str, Audio]]=None,
         audio_frames: Optional[Iterable[Tuple[float]]]=None,
         audio_rate: Optional[int]=None,
     ) -> None:
         self.frames = reiterator(frames)
         self.frame_rate = frame_rate
+        self.audio_rate = audio_rate
         if audio is not None:
             self.audio = audio
         elif audio_frames is not None:
@@ -47,14 +49,20 @@ class Video:
     def save(
         self,
         path: str,
-        overwrite: bool = False,
-        rate: float=20.0,
-        encoder: str="avc1",
+        overwrite: bool=False,
+        rate: Optional[float]=None,
+        audio_rate: Optional[int]=None,
     ) -> int:
         """
         Saves PIL image frames to a video.
         Returns the total size of the video in bytes.
         """
+        if rate is None:
+            rate = self.frame_rate
+        if rate is None:
+            raise ValueError(f"Rate cannot be None.")
+        if audio_rate is None:
+            audio_rate = self.audio_rate
         if path.startswith("~"):
             path = os.path.expanduser(path)
         if os.path.exists(path):
@@ -73,24 +81,41 @@ class Video:
             raise IOError(f"Unknown file extension {ext}")
 
         from moviepy.editor import ImageSequenceClip
+        from moviepy.video.io.ffmpeg_writer import ffmpeg_write_video
+        from enfugue.diffusion.util.audio_util.helper import Audio
         import numpy as np
 
         clip_frames = [np.array(frame) for frame in self.frames] # type: ignore[attr-defined]
-
         catcher = OutputCatcher()
         with catcher:
             try:
                 clip = ImageSequenceClip(clip_frames, fps=rate)
+                remove_audio_file = False
 
                 if self.audio is not None:
-                    clip.audio = self.audio.get_composite_clip(
-                        maximum_seconds=len(clip_frames)/rate
-                    )
+                    if isinstance(self.audio, str):
+                        audio_file = self.audio
+                        if not audio_file.endswith(".mp3"):
+                            new_audio_file = os.path.join(tempfile.mkdtemp(), "audio.mp3")
+                            Audio.from_file(audio_file).save(new_audio_file, rate=audio_rate)
+                            audio_file = new_audio_file
+                            remove_audio_file = True
+                    else:
+                        audio_file = os.path.join(tempfile.mkdtemp(), "audio.mp3")
+                        self.audio.save(audio_file, rate=audio_rate)
+                        remove_audio_file = True
+                else:
+                    audio_file = None
 
-                clip.write_videofile(path, fps=rate, logger=None)
+                ffmpeg_write_video(clip, path, rate, codec="mpeg4", audiofile=audio_file)
 
                 if not os.path.exists(path):
                     raise IOError(f"Nothing was written to {path}")
+                if remove_audio_file:
+                    try:
+                        os.remove(audio_file)
+                    except:
+                        pass
                 return os.path.getsize(path)
             finally:
                 out, err = catcher.output()

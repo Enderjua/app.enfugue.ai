@@ -78,9 +78,9 @@ class AutoencoderKL(pl.LightningModule):
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
-    def decode(self, z):
+    def decode(self, z, step_complete=None):
         z = self.post_quant_conv(z)
-        dec = self.decoder(z)
+        dec = self.decoder(z, step_complete=step_complete)
         return dec
     
     def trained_decode(self, z):
@@ -88,13 +88,15 @@ class AutoencoderKL(pl.LightningModule):
         dec = self.decoder(z)
         return dec
 
-    def forward(self, input, sample_posterior=True):
+    def forward(self, input, sample_posterior=True, step_complete=None):
         posterior = self.encode(input)
         if sample_posterior:
             z = posterior.sample()
         else:
             z = posterior.mode()
         dec = self.decode(z)
+        if step_complete is not None:
+            step_complete(True)
         return dec, posterior
 
     def get_input(self, batch, k):

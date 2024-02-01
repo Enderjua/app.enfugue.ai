@@ -49,7 +49,7 @@ class ComputerVision:
     @classmethod
     def tracking_features(
         cls,
-        image: NDArray,
+        image: Union[NDArray, Image.Image],
         max_corners: int=100,
         quality_level: float=0.3,
         min_distance: int=7,
