@@ -148,6 +148,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
         position_encoding_truncate_length: Optional[int]=None,
         position_encoding_scale_length: Optional[int]=None,
         task_callback: Optional[Callable[[str], None]]=None,
+        use_lora_compatible_layers: bool=True,
         **kwargs: Any
     ) -> EnfugueAnimateStableDiffusionPipeline:
         """
@@ -182,6 +183,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
             motion_module=motion_module,
             position_encoding_truncate_length=position_encoding_truncate_length,
             position_encoding_scale_length=position_encoding_scale_length,
+            use_lora_compatible_layers=use_lora_compatible_layers,
             task_callback=task_callback,
         )
 
@@ -335,6 +337,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
         task_callback: Optional[Callable[[str], None]]=None,
         position_encoding_truncate_length: Optional[int]=None,
         position_encoding_scale_length: Optional[int]=None,
+        use_lora_compatible_layers: bool=True,
         **unet_additional_kwargs: Any
     ) -> ModelMixin:
         """
@@ -356,6 +359,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
 
         # Detect MM version
         logger.debug(f"Loading motion module {motion_module} to detect MMV1/2/3")
+        is_animate_lcm = False
         state_dict = load_state_dict(motion_module)
 
         if cls.MOTION_MODULE_PE_KEY in state_dict:
@@ -379,17 +383,21 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
                         position_encoding_scale_length = position_tensor.shape[1]
                 else:
                     raise ValueError(f"Position encoder tensor has unsupported length {position_tensor.shape[1]}")
+        elif cls.MOTION_MODULE_MID_KEY in state_dict:
+            animate_diff_mm_version = 2
+            is_animate_lcm = True
         else:
             raise ValueError(f"Couldn't detect motion module version from {motion_module}. It may be an unsupported format.")
 
         motion_module = state_dict # type: ignore[assignment]
 
         config["mid_block_type"] = "UNetMidBlock3DCrossAttn"
-        default_position_encoding_len = 32 if animate_diff_mm_version >= 2 else 24
-        position_encoding_len = default_position_encoding_len
+        default_position_encoding_length = 64 if is_animate_lcm else 32 if animate_diff_mm_version >= 2 else 24
+        position_encoding_length = default_position_encoding_length
         if position_encoding_scale_length:
-            position_encoding_len = position_encoding_scale_length
+            position_encoding_length = position_encoding_scale_length
 
+        unet_additional_kwargs["use_lora_compatible_layers"] = use_lora_compatible_layers
         unet_additional_kwargs["use_inflated_groupnorm"] = animate_diff_mm_version >= 2
         unet_additional_kwargs["unet_use_cross_frame_attention"] = False
         unet_additional_kwargs["unet_use_temporal_attention"] = False
@@ -406,11 +414,12 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
                 "Temporal_Self"
             ],
             "temporal_position_encoding": True,
-            "temporal_position_encoding_max_len": position_encoding_len,
+            "temporal_position_encoding_max_len": position_encoding_length,
             "temporal_attention_dim_div": 1
         }
 
         model = AnimateDiffUNet.from_config(config, **unet_additional_kwargs)
+        model.default_position_encoding_length = default_position_encoding_length
         model.position_encoding_truncate_length = position_encoding_truncate_length
         model.position_encoding_scale_length = position_encoding_scale_length
 
@@ -528,10 +537,10 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
             "UpBlock3D"
         ]
         config["mid_block_type"] = "UNetMidBlock3DCrossAttn"
-        default_position_encoding_len = 32
-        position_encoding_len = default_position_encoding_len
+        default_position_encoding_length = 32
+        position_encoding_length = default_position_encoding_length
         if position_encoding_scale_length:
-            position_encoding_len = position_encoding_scale_length
+            position_encoding_length = position_encoding_scale_length
 
         unet_additional_kwargs["use_motion_module"] = True
         unet_additional_kwargs["motion_module_resolutions"] = [1, 2, 4, 8]
@@ -545,7 +554,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
                 "Temporal_Self"
             ],
             "temporal_position_encoding": True,
-            "temporal_position_encoding_max_len": position_encoding_len,
+            "temporal_position_encoding_max_len": position_encoding_length,
             "temporal_attention_dim_div": 1
         }
 
@@ -564,7 +573,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
         Gets configuration for the sparse controlnet.
         """
         config = super(EnfugueAnimateStableDiffusionPipeline, self).get_sparse_controlnet_config(use_simplified_embedding)
-        encoding_length = getattr(self.unet, "position_encoding_scale_length", None)
+        encoding_length = getattr(self.unet, "position_encoding_scale_length", getattr(self.unet, "default_position_encoding_length", None))
         if encoding_length is None:
             encoding_length = 32
         return {

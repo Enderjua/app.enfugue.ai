@@ -249,7 +249,9 @@ class UNetMidBlock3DCrossAttn(nn.Module):
         encoder_hidden_states=None,
         attention_mask=None,
         cross_attention_kwargs=None,
-        enable_temporal_attentions: bool = True
+        enable_temporal_attentions=True,
+        frame_window_size=None,
+        frame_window_stride=None,
     ):
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
@@ -353,14 +355,25 @@ class CrossAttnDownBlock3D(nn.Module):
 
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None,
-                cross_attention_kwargs=None, enable_temporal_attentions: bool = True):
+    def forward(
+        self,
+        hidden_states,
+        temb=None,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        cross_attention_kwargs=None,
+        enable_temporal_attentions=True,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
         output_states = ()
 
-        for resnet, attn, temporal_attention \
-                in zip(self.resnets, self.attentions, self.temporal_attentions):
+        for resnet, attn, temporal_attention in zip(
+            self.resnets,
+            self.attentions,
+            self.temporal_attentions
+        ):
             if self.training and self.gradient_checkpointing:
-
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
                         if return_dict is not None:
@@ -370,8 +383,12 @@ class CrossAttnDownBlock3D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb,
-                                                                  use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(resnet),
+                    hidden_states,
+                    temb,
+                    use_reentrant=False
+                )
 
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(attn, return_dict=False),
@@ -379,19 +396,22 @@ class CrossAttnDownBlock3D(nn.Module):
                     encoder_hidden_states,
                     use_reentrant=False
                 )[0]
-                if enable_temporal_attentions and temporal_attention is not None:
-                    hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(temporal_attention),
-                                                                      hidden_states, encoder_hidden_states,
-                                                                      use_reentrant=False)
 
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(temporal_attention),
+                    hidden_states,
+                    encoder_hidden_states,
+                    use_reentrant=False
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
             else:
                 hidden_states = resnet(hidden_states, temb)
-
                 hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
-
-                if temporal_attention and enable_temporal_attentions:
-                    hidden_states = temporal_attention(hidden_states,
-                                                       encoder_hidden_states=encoder_hidden_states)
+                hidden_states = temporal_attention(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
 
             output_states += (hidden_states,)
 
@@ -421,21 +441,21 @@ class CrossAttnDownBlock3D(nn.Module):
 
 class DownBlock3D(nn.Module):
     def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            temb_channels: int,
-            dropout: float = 0.0,
-            num_layers: int = 1,
-            resnet_eps: float = 1e-6,
-            resnet_time_scale_shift: str = "default",
-            resnet_act_fn: str = "swish",
-            resnet_groups: int = 32,
-            resnet_pre_norm: bool = True,
-            output_scale_factor=1.0,
-            add_downsample=True,
-            downsample_padding=1,
-            positional_encoding_max_length=24,
+        self,
+        in_channels: int,
+        out_channels: int,
+        temb_channels: int,
+        dropout: float = 0.0,
+        num_layers: int = 1,
+        resnet_eps: float = 1e-6,
+        resnet_time_scale_shift: str = "default",
+        resnet_act_fn: str = "swish",
+        resnet_groups: int = 32,
+        resnet_pre_norm: bool = True,
+        output_scale_factor=1.0,
+        add_downsample=True,
+        downsample_padding=1,
+        positional_encoding_max_length=24,
     ):
         super().__init__()
         resnets = []
@@ -491,7 +511,15 @@ class DownBlock3D(nn.Module):
         for temporal_attention in self.temporal_attentions:
             temporal_attention.reset_attention_scale_multiplier()
 
-    def forward(self, hidden_states, temb=None, encoder_hidden_states=None, enable_temporal_attentions: bool = True):
+    def forward(
+        self,
+        hidden_states,
+        temb=None,
+        encoder_hidden_states=None,
+        enable_temporal_attentions=True,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
         output_states = ()
         for resnet, temporal_attention in zip(self.resnets, self.temporal_attentions):
             if self.training and self.gradient_checkpointing:
@@ -501,17 +529,26 @@ class DownBlock3D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb,
-                                                                  use_reentrant=False)
-                if enable_temporal_attentions and temporal_attention is not None:
-                    hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(temporal_attention),
-                                                                      hidden_states, encoder_hidden_states,
-                                                                      use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(resnet),
+                    hidden_states,
+                    temb,
+                    use_reentrant=False
+                )
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(temporal_attention),
+                    hidden_states,
+                    encoder_hidden_states,
+                    use_reentrant=False
+                ) if use_temporal_attentions and temporal_attention is not None else hidden_states
             else:
                 hidden_states = resnet(hidden_states, temb)
-
-                if enable_temporal_attentions and temporal_attention:
-                    hidden_states = temporal_attention(hidden_states, encoder_hidden_states=encoder_hidden_states)
+                hidden_states = temporal_attention(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
 
             output_states += (hidden_states,)
 
@@ -637,7 +674,9 @@ class CrossAttnUpBlock3D(nn.Module):
         upsample_size=None,
         cross_attention_kwargs=None,
         attention_mask=None,
-        enable_temporal_attentions: bool = True
+        enable_temporal_attentions=True,
+        frame_window_size=None,
+        frame_window_stride=None,
     ):
         is_freeu_enabled = (
             getattr(self, "s1", None)
@@ -674,8 +713,12 @@ class CrossAttnUpBlock3D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb,
-                                                                  use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(resnet),
+                    hidden_states,
+                    temb,
+                    use_reentrant=False
+                )
 
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(attn, return_dict=False),
@@ -683,18 +726,21 @@ class CrossAttnUpBlock3D(nn.Module):
                     encoder_hidden_states,
                     use_reentrant=False,
                 )[0]
-                if enable_temporal_attentions and temporal_attention is not None:
-                    hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(temporal_attention),
-                                                                      hidden_states, encoder_hidden_states,
-                                                                      use_reentrant=False)
-
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(temporal_attention),
+                    hidden_states,
+                    encoder_hidden_states,
+                    use_reentrant=False
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
             else:
                 hidden_states = resnet(hidden_states, temb)
                 hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
-
-                if enable_temporal_attentions and temporal_attention:
-                    hidden_states = temporal_attention(hidden_states,
-                                                       encoder_hidden_states=encoder_hidden_states)
+                hidden_states = temporal_attention(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -787,7 +833,9 @@ class UpBlock3D(nn.Module):
         temb=None,
         upsample_size=None,
         encoder_hidden_states=None,
-        enable_temporal_attentions: bool = True
+        enable_temporal_attentions=True,
+        frame_window_size=None,
+        frame_window_stride=None,
     ):
         is_freeu_enabled = (
             getattr(self, "s1", None)
@@ -819,16 +867,26 @@ class UpBlock3D(nn.Module):
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb,
-                                                                  use_reentrant=False)
-                if enable_temporal_attentions and temporal_attention is not None:
-                    hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(temporal_attention),
-                                                                      hidden_states, encoder_hidden_states,
-                                                                      use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(resnet),
+                    hidden_states,
+                    temb,
+                    use_reentrant=False
+                )
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(temporal_attention),
+                    hidden_states,
+                    encoder_hidden_states,
+                    use_reentrant=False
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
             else:
                 hidden_states = resnet(hidden_states, temb)
-                hidden_states = temporal_attention(hidden_states,
-                                                   encoder_hidden_states=encoder_hidden_states) if enable_temporal_attentions and temporal_attention is not None else hidden_states
+                hidden_states = temporal_attention(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
+                ) if enable_temporal_attentions and temporal_attention is not None else hidden_states
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:

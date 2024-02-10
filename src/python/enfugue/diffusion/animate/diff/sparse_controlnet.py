@@ -30,7 +30,10 @@ from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.unet_2d_blocks import CrossAttnDownBlock2D, DownBlock2D
 from diffusers.models.modeling_utils import ModelMixin
 
-from enfugue.diffusion.animate.diff.resnet import InflatedConv3d
+from enfugue.diffusion.animate.diff.resnet import (
+    InflatedConv3d,
+    LoRACompatibleInflatedConv3d
+)
 from enfugue.diffusion.animate.diff.unet_blocks import (
     UNetMidBlock3DCrossAttn,
     get_down_block,
@@ -53,21 +56,25 @@ class SparseControlNetConditioningEmbedding(nn.Module):
         conditioning_embedding_channels: int,
         conditioning_channels: int = 3,
         block_out_channels: Tuple[int] = (16, 32, 96, 256),
+        use_lora_compatible_layers: bool = True,
     ):
         super().__init__()
+        if use_lora_compatible_layers:
+            conv_cls = LoRACompatibleInflatedConv3d
+        else:
+            conv_cls = InflatedConv3d
 
-        self.conv_in = InflatedConv3d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
-
+        self.conv_in = conv_cls(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
         self.blocks = nn.ModuleList([])
 
         for i in range(len(block_out_channels) - 1):
             channel_in = block_out_channels[i]
             channel_out = block_out_channels[i + 1]
-            self.blocks.append(InflatedConv3d(channel_in, channel_in, kernel_size=3, padding=1))
-            self.blocks.append(InflatedConv3d(channel_in, channel_out, kernel_size=3, padding=1, stride=2))
+            self.blocks.append(conv_cls(channel_in, channel_in, kernel_size=3, padding=1))
+            self.blocks.append(conv_cls(channel_in, channel_out, kernel_size=3, padding=1, stride=2))
 
         self.conv_out = zero_module(
-            InflatedConv3d(block_out_channels[-1], conditioning_embedding_channels, kernel_size=3, padding=1)
+            conv_cls(block_out_channels[-1], conditioning_embedding_channels, kernel_size=3, padding=1)
         )
 
     def forward(self, conditioning):
@@ -119,7 +126,7 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
         controlnet_conditioning_channel_order: str = "rgb",
         conditioning_embedding_out_channels: Optional[Tuple[int]] = (16, 32, 96, 256),
         global_pool_conditions: bool = False,
-
+        use_lora_compatible_layers= True,
         use_motion_module         = True,
         motion_module_resolutions = ( 1,2,4,8 ),
         motion_module_mid_block   = False,
@@ -167,10 +174,11 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
 
         # input
         self.set_noisy_sample_input_to_zero  = set_noisy_sample_input_to_zero
+        conv_cls = LoRACompatibleInflatedConv3d if use_lora_compatible_layers else InflatedConv3d
 
         conv_in_kernel = 3
         conv_in_padding = (conv_in_kernel - 1) // 2
-        self.conv_in = InflatedConv3d(
+        self.conv_in = conv_cls(
             in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
         )
 
@@ -181,13 +189,14 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
         # control net conditioning embedding
         if use_simplified_condition_embedding:
             self.controlnet_cond_embedding = zero_module(
-                InflatedConv3d(conditioning_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding)
+                conv_cls(conditioning_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding)
             )
         else:
             self.controlnet_cond_embedding = SparseControlNetConditioningEmbedding(
                 conditioning_embedding_channels=block_out_channels[0],
                 block_out_channels=conditioning_embedding_out_channels,
                 conditioning_channels=conditioning_channels,
+                use_lora_compatible_layers=use_lora_compatible_layers,
             )
         self.use_simplified_condition_embedding = use_simplified_condition_embedding
 
@@ -242,7 +251,7 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
         # down
         output_channel = block_out_channels[0]
 
-        controlnet_block = InflatedConv3d(output_channel, output_channel, kernel_size=1)
+        controlnet_block = conv_cls(output_channel, output_channel, kernel_size=1)
         controlnet_block = zero_module(controlnet_block)
         self.controlnet_down_blocks.append(controlnet_block)
 
@@ -269,9 +278,8 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
                 only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
                 resnet_time_scale_shift=resnet_time_scale_shift,
-
                 use_inflated_groupnorm=True,
-
+                use_lora_compatible_layers=use_lora_compatible_layers,
                 use_motion_module=use_motion_module and (res in motion_module_resolutions),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
@@ -279,19 +287,19 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
             self.down_blocks.append(down_block)
 
             for _ in range(layers_per_block):
-                controlnet_block = InflatedConv3d(output_channel, output_channel, kernel_size=1)
+                controlnet_block = conv_cls(output_channel, output_channel, kernel_size=1)
                 controlnet_block = zero_module(controlnet_block)
                 self.controlnet_down_blocks.append(controlnet_block)
 
             if not is_final_block:
-                controlnet_block = InflatedConv3d(output_channel, output_channel, kernel_size=1)
+                controlnet_block = conv_cls(output_channel, output_channel, kernel_size=1)
                 controlnet_block = zero_module(controlnet_block)
                 self.controlnet_down_blocks.append(controlnet_block)
 
         # mid
         mid_block_channel = block_out_channels[-1]
 
-        controlnet_block = InflatedConv3d(mid_block_channel, mid_block_channel, kernel_size=1)
+        controlnet_block = conv_cls(mid_block_channel, mid_block_channel, kernel_size=1)
         controlnet_block = zero_module(controlnet_block)
         self.controlnet_mid_block = controlnet_block
 
@@ -307,7 +315,7 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
             resnet_groups=norm_num_groups,
             use_linear_projection=use_linear_projection,
             upcast_attention=upcast_attention,
-
+            use_lora_compatible_layers=use_lora_compatible_layers,
             use_inflated_groupnorm=True,
             use_motion_module=use_motion_module and motion_module_mid_block,
             motion_module_type=motion_module_type,
@@ -321,7 +329,7 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
         controlnet_conditioning_channel_order: str = "rgb",
         conditioning_embedding_out_channels: Optional[Tuple[int]] = (16, 32, 96, 256),
         load_weights_from_unet: bool = True,
-
+        use_lora_compatible_layers: bool = True,
         controlnet_additional_kwargs: dict = {},
     ):
         controlnet = cls(
@@ -348,7 +356,7 @@ class SparseControlNetModel(ModelMixin, ConfigMixin):
             projection_class_embeddings_input_dim=unet.config.projection_class_embeddings_input_dim,
             controlnet_conditioning_channel_order=controlnet_conditioning_channel_order,
             conditioning_embedding_out_channels=conditioning_embedding_out_channels,
-
+            use_lora_compatible_layers=use_lora_compatible_layers,
             **controlnet_additional_kwargs,
         )
 

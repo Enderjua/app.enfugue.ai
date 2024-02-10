@@ -244,3 +244,44 @@ class Audio:
             on_open=get_rate_on_open
         )
         return cls(frames=frames, rate=rate)
+
+    @classmethod
+    def combine(
+        cls,
+        *audios: Union[str, List[Tuple[float]]],
+        **kwargs: Any
+    ) -> Audio:
+        """
+        Combines multiple audio chunks
+        """
+        num_audios = len(audios)
+        rate: Optional[float] = kwargs.get("rate", None)
+        silence: Optional[float] = kwargs.get("silence", None)
+
+        def maybe_get_rate_on_open(clip: AudioFileClip) -> None:
+            nonlocal rate
+            if rate is None:
+                rate = clip.fps
+
+        def iterate_audio() -> Iterable[Tuple[float]]:
+            nonlocal rate
+            channels: Optional[int] = None
+            for i, audio in enumerate(audios):
+                if isinstance(audio, str):
+                    frames = cls.file_to_frames(
+                        path=audio,
+                        on_open=maybe_get_rate_on_open
+                    )
+                else:
+                    frames = audio
+                for frame in frames:
+                    if channels is None:
+                        channels = len(frame)
+                    yield frame
+                if i < num_audios - 1 and silence:
+                    silence_frames = (rate if rate else 44100) * silence
+                    silence_channels = (channels if channels else 1)
+                    for j in range(int(silence_frames)):
+                        yield (0,) * silence_channels
+
+        return cls(frames=iterate_audio(), rate=rate)

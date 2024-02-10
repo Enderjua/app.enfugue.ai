@@ -81,6 +81,12 @@ dependencies:
     - xformers>=0.0.20
     - onnx>=1.14,<2.0
     - onnxruntime-gpu>=1.14,<2.0
+    - decord>=0.6.0
+    - loralib>=0.1.2
+    - tyro>=0.7.0 # MB
+    - deepfilternet>=0.5.0
+    - tiktoken==0.5.1
+    - flash_attn>=2.5.0
     - git+https://github.com/openai/CLIP.git@main#egg=clip
     - git+https://github.com/CompVis/stable-diffusion.git@main#egg=latent-diffusion
     - git+https://github.com/facebookresearch/audiocraft.git@main#egg=audiocraft

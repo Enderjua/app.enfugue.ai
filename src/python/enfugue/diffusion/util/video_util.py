@@ -107,7 +107,7 @@ class Video:
                 else:
                     audio_file = None
 
-                ffmpeg_write_video(clip, path, rate, codec="mpeg4", audiofile=audio_file)
+                ffmpeg_write_video(clip, path, rate, audiofile=audio_file)
 
                 if not os.path.exists(path):
                     raise IOError(f"Nothing was written to {path}")

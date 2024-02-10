@@ -10,7 +10,17 @@ from einops import rearrange
 
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 
-class InflatedConv3d(LoRACompatibleConv):
+class InflatedConv3d(nn.Conv2d):
+    def forward(self, x):
+        video_length = x.shape[2]
+
+        x = rearrange(x, "b c f h w -> (b f) c h w")
+        x = super().forward(x)
+        x = rearrange(x, "(b f) c h w -> b c f h w", f=video_length)
+
+        return x
+
+class LoRACompatibleInflatedConv3d(LoRACompatibleConv):
     def forward(self, x):
         video_length = x.shape[2]
 
@@ -33,7 +43,7 @@ class InflatedGroupNorm(nn.GroupNorm):
 
 
 class Upsample3D(nn.Module):
-    def __init__(self, channels, use_conv=False, use_conv_transpose=False, out_channels=None, name="conv"):
+    def __init__(self, channels, use_conv=False, use_lora_compatible_layers=True, use_conv_transpose=False, out_channels=None, name="conv"):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -44,6 +54,8 @@ class Upsample3D(nn.Module):
         conv = None
         if use_conv_transpose:
             raise NotImplementedError
+        elif use_conv and use_lora_compatible_layers:
+            self.conv = LoRACompatibleInflatedConv3d(self.channels, self.out_channels, 3, padding=1)
         elif use_conv:
             self.conv = InflatedConv3d(self.channels, self.out_channels, 3, padding=1)
 
@@ -84,7 +96,7 @@ class Upsample3D(nn.Module):
 
 
 class Downsample3D(nn.Module):
-    def __init__(self, channels, use_conv=False, out_channels=None, padding=1, name="conv"):
+    def __init__(self, channels, use_conv=False, use_lora_compatible_layers=True, out_channels=None, padding=1, name="conv"):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -93,7 +105,9 @@ class Downsample3D(nn.Module):
         stride = 2
         self.name = name
 
-        if use_conv:
+        if use_conv and use_lora_compatible_layers:
+            self.conv = LoRACompatibleInflatedConv3d(self.channels, self.out_channels, 3, stride=stride, padding=padding)
+        elif use_conv:
             self.conv = InflatedConv3d(self.channels, self.out_channels, 3, stride=stride, padding=padding)
         else:
             raise NotImplementedError
@@ -127,6 +141,7 @@ class ResnetBlock3D(nn.Module):
         output_scale_factor=1.0,
         use_in_shortcut=None,
         use_inflated_groupnorm=False,
+        use_lora_compatible_layers=True
     ):
         super().__init__()
         self.pre_norm = pre_norm
@@ -147,7 +162,10 @@ class ResnetBlock3D(nn.Module):
         else:
             self.norm1 = torch.nn.GroupNorm(num_groups=groups, num_channels=in_channels, eps=eps, affine=True)
 
-        self.conv1 = InflatedConv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        if use_lora_compatible_layers:
+            self.conv1 = LoRACompatibleInflatedConv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        else:
+            self.conv1 = InflatedConv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
 
         if temb_channels is not None:
             if self.time_embedding_norm == "default":
@@ -167,7 +185,11 @@ class ResnetBlock3D(nn.Module):
             self.norm2 = torch.nn.GroupNorm(num_groups=groups_out, num_channels=out_channels, eps=eps, affine=True)
 
         self.dropout = torch.nn.Dropout(dropout)
-        self.conv2 = InflatedConv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+
+        if use_lora_compatible_layers:
+            self.conv2 = LoRACompatibleInflatedConv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        else:
+            self.conv2 = InflatedConv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
 
         if non_linearity == "swish":
             self.nonlinearity = lambda x: F.silu(x)
@@ -180,7 +202,10 @@ class ResnetBlock3D(nn.Module):
 
         self.conv_shortcut = None
         if self.use_in_shortcut:
-            self.conv_shortcut = InflatedConv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+            if use_lora_compatible_layers:
+                self.conv_shortcut = LoRACompatibleInflatedConv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+            else:
+                self.conv_shortcut = InflatedConv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, input_tensor, temb):
         hidden_states = input_tensor

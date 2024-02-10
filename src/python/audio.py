@@ -26,7 +26,7 @@ sr_audio_rate = 48000
 height_chunks = 2
 width_chunks = 2
 
-image = Image.open("./input.png")
+image = Image.open("./iso.png")
 
 with DebugUnifiedLoggingContext():
     """

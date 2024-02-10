@@ -8,12 +8,12 @@ from typing import Iterator, Callable, Any
 from contextlib import contextmanager
 from PIL import Image
 
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 __all__ = ["EdgeDetector"]
 
 
-class CannyImageProcessor(SupportModelImageProcessor):
+class CannyImageProcessor(SupportModelProcessor):
     """
     Simply stores thresholds for processor
     """
@@ -29,7 +29,7 @@ class CannyImageProcessor(SupportModelImageProcessor):
         canny = cv2.Canny(np.array(image), self.lower, self.upper)[:, :, None]
         return Image.fromarray(np.concatenate([canny, canny, canny], axis=2))
 
-class PidiImageProcessor(SupportModelImageProcessor):
+class PidiImageProcessor(SupportModelProcessor):
     """
     Stores a reference to the Pidi detector.
     """
@@ -49,7 +49,7 @@ class PidiImageProcessor(SupportModelImageProcessor):
             safe=True
         ).resize(image.size)
 
-class HEDImageProcessor(SupportModelImageProcessor):
+class HEDImageProcessor(SupportModelProcessor):
     """
     Stores a reference to the HED detector.
     """
@@ -79,7 +79,7 @@ class EdgeDetector(SupportModel):
     HEDNET_PATH = "https://huggingface.co/lllyasviel/Annotators/resolve/main/ControlNetHED.pth"
 
     @contextmanager
-    def canny(self, lower: int = 100, upper: int = 200) -> Iterator[SupportModelImageProcessor]:
+    def canny(self, lower: int = 100, upper: int = 200) -> Iterator[SupportModelProcessor]:
         """
         Runs canny edge detection on an image. This one isn't AI.
         """

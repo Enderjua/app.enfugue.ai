@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image
     import torch
 
-class SupportModelImageProcessor:
+class SupportModelProcessor:
     def __init__(self, **kwargs: Any) -> None:
         """
         Provides a base class for processing images with an AI model.
@@ -33,7 +33,7 @@ class SupportModelImageProcessor:
         """
         return
 
-    def __call__(self, image: Image) -> Image:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
         Implemented by the image processor.
         """
@@ -44,7 +44,7 @@ class SupportModel:
     Provides a base class for AI models that support diffusion.
     """
 
-    process: Optional[SupportModelImageProcessor] = None
+    process: Optional[SupportModelProcessor] = None
     task_callback: Optional[Callable[[str], None]] = None
 
     def __init__(

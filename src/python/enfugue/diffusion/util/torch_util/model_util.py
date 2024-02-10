@@ -50,7 +50,7 @@ def load_state_dict(path: str, device: Union[str, Device]="cpu") -> Dict[str, Un
                 first_error = ex
 
     if first_error is not None:
-        raise IOError(f"Recevied exception reading checkpoint {path}, please ensure file integrity.\n{type(first_error).__name__}: {first_error}")
+        raise IOError(f"Received exception reading checkpoint {path}, please ensure file integrity.\n{type(first_error).__name__}: {first_error}")
     raise IOError(f"No data read from path {path}")
 
 def iterate_state_dict(path: str, device: Union[str, Device]="cpu") -> Iterable[Tuple[str, Tensor]]:

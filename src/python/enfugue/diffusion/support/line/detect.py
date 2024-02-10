@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 from enfugue.diffusion.util import ComputerVision
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 from typing import Iterator, Any, Callable, TYPE_CHECKING
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = ["LineDetector"]
 
-class LineArtImageProcessor(SupportModelImageProcessor):
+class LineArtImageProcessor(SupportModelProcessor):
     """
     Used to detect line art
     """
@@ -35,7 +35,7 @@ class LineArtImageProcessor(SupportModelImageProcessor):
             image_resolution=resolution
         ).resize(image.size)
 
-class MLSDImageProcessor(SupportModelImageProcessor):
+class MLSDImageProcessor(SupportModelProcessor):
     """
     Used to detect straight lines
     """

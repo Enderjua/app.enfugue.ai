@@ -13,6 +13,23 @@ from diffusers.models.lora import LoRACompatibleLinear
 from einops import rearrange, repeat
 import math
 
+def get_views(video_length, window_size=16, stride=4):
+    num_blocks_time = (video_length - window_size) // stride + 1
+    views = []
+    for i in range(num_blocks_time):
+        t_start = int(i * stride)
+        t_end = t_start + window_size
+        views.append((t_start,t_end))
+    return views
+
+def generate_weight_sequence(n):
+    if n % 2 == 0:
+        max_weight = n // 2
+        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+    else:
+        max_weight = (n + 1) // 2
+        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+    return weight_sequence
 
 def zero_module(module):
     # Zero out the parameters of a module and return it.
@@ -37,10 +54,15 @@ else:
 def get_motion_module(
     in_channels,
     motion_module_type: str, 
-    motion_module_kwargs: dict
+    motion_module_kwargs: dict,
+    use_lora_compatible_layers: bool=True
 ):
     if motion_module_type == "Vanilla":
-        return VanillaTemporalModule(in_channels=in_channels, **motion_module_kwargs,)    
+        return VanillaTemporalModule(
+            in_channels=in_channels, 
+            use_lora_compatible_layers=use_lora_compatible_layers,
+            **motion_module_kwargs
+        )
     else:
         raise ValueError
 
@@ -56,6 +78,7 @@ class VanillaTemporalModule(nn.Module):
         temporal_position_encoding_max_len = 24,
         temporal_attention_dim_div         = 1,
         attention_scale_multiplier         = 1.0,
+        use_lora_compatible_layers         = True,
         zero_initialize                    = True,
     ):
         super().__init__()
@@ -68,12 +91,13 @@ class VanillaTemporalModule(nn.Module):
             attention_block_types=attention_block_types,
             cross_frame_attention_mode=cross_frame_attention_mode,
             attention_scale_multiplier=attention_scale_multiplier,
+            use_lora_compatible_layers=use_lora_compatible_layers,
             temporal_position_encoding=temporal_position_encoding,
             temporal_position_encoding_max_len=temporal_position_encoding_max_len,
         )
-        
-        if zero_initialize:
-            self.temporal_transformer.proj_out = zero_module(self.temporal_transformer.proj_out)
+
+        #if zero_initialize:
+        #self.temporal_transformer.proj_out = zero_module(self.temporal_transformer.proj_out)
 
     def set_attention_scale_multiplier(self, attention_scale: float = 1.0) -> None:
         self.temporal_transformer.set_attention_scale_multiplier(attention_scale)
@@ -81,9 +105,26 @@ class VanillaTemporalModule(nn.Module):
     def reset_attention_scale_multiplier(self) -> None:
         self.temporal_transformer.reset_attention_scale_multiplier()
 
-    def forward(self, input_tensor, temb, encoder_hidden_states, attention_mask=None, anchor_frame_idx=None, motion_attention_mask=None):
+    def forward(
+        self,
+        input_tensor,
+        temb,
+        encoder_hidden_states,
+        attention_mask=None,
+        anchor_frame_idx=None,
+        motion_attention_mask=None,
+        frame_window_size=None,
+        frame_window_stride=None
+    ):
         hidden_states = input_tensor
-        hidden_states = self.temporal_transformer(hidden_states, encoder_hidden_states, attention_mask, motion_attention_mask=motion_attention_mask)
+        hidden_states = self.temporal_transformer(
+            hidden_states,
+            encoder_hidden_states,
+            attention_mask,
+            motion_attention_mask=motion_attention_mask,
+            frame_window_size=frame_window_size,
+            frame_window_stride=frame_window_stride
+        )
 
         output = hidden_states
         return output
@@ -103,7 +144,7 @@ class TemporalTransformer3DModel(nn.Module):
         activation_fn                      = "geglu",
         attention_bias                     = False,
         upcast_attention                   = False,
-        
+        use_lora_compatible_layers         = True,
         cross_frame_attention_mode         = None,
         temporal_position_encoding         = False,
         temporal_position_encoding_max_len = 24,
@@ -114,7 +155,12 @@ class TemporalTransformer3DModel(nn.Module):
         inner_dim = num_attention_heads * attention_head_dim
 
         self.norm = torch.nn.GroupNorm(num_groups=norm_num_groups, num_channels=in_channels, eps=1e-6, affine=True)
-        self.proj_in = LoRACompatibleLinear(in_channels, inner_dim)
+        if use_lora_compatible_layers:
+            self.proj_in = LoRACompatibleLinear(in_channels, inner_dim)
+            self.proj_out = LoRACompatibleLinear(inner_dim, in_channels)
+        else:
+            self.proj_in = torch.nn.Linear(in_channels, inner_dim)
+            self.proj_out = torch.nn.Linear(inner_dim, in_channels)
 
         self.transformer_blocks = nn.ModuleList(
             [
@@ -137,7 +183,6 @@ class TemporalTransformer3DModel(nn.Module):
                 for d in range(num_layers)
             ]
         )
-        self.proj_out = LoRACompatibleLinear(inner_dim, in_channels)
 
     def set_attention_scale_multiplier(self, attention_scale: float = 1.0) -> None:
         for block in self.transformer_blocks:
@@ -147,7 +192,15 @@ class TemporalTransformer3DModel(nn.Module):
         for block in self.transformer_blocks:
             block.reset_attention_scale_multiplier()
 
-    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, motion_attention_mask=None):
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        motion_attention_mask=None,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
         assert hidden_states.dim() == 5, f"Expected hidden_states to have ndim=5, but got ndim={hidden_states.dim()}."
         video_length = hidden_states.shape[2]
         hidden_states = rearrange(hidden_states, "b c f h w -> (b f) c h w")
@@ -162,17 +215,23 @@ class TemporalTransformer3DModel(nn.Module):
 
         # Transformer Blocks
         for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states, video_length=video_length, motion_attention_mask=motion_attention_mask)
-        
+            hidden_states = block(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                video_length=video_length,
+                motion_attention_mask=motion_attention_mask,
+                frame_window_size=frame_window_size,
+                frame_window_stride=frame_window_stride
+            )
+
         # output
         hidden_states = self.proj_out(hidden_states)
         hidden_states = hidden_states.reshape(batch, height, weight, inner_dim).permute(0, 3, 1, 2).contiguous()
 
         output = hidden_states + residual
         output = rearrange(output, "(b f) c h w -> b c f h w", f=video_length)
-        
-        return output
 
+        return output
 
 class TemporalTransformerBlock(nn.Module):
     def __init__(
@@ -231,15 +290,50 @@ class TemporalTransformerBlock(nn.Module):
         for block in self.attention_blocks:
             block.reset_scale_multiplier()
 
-    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, video_length=None, motion_attention_mask=None):
-        for attention_block, norm in zip(self.attention_blocks, self.norms):
-            norm_hidden_states = norm(hidden_states)
-            hidden_states = attention_block(
-                norm_hidden_states,
-                encoder_hidden_states=encoder_hidden_states if attention_block.is_cross_attention else None,
-                video_length=video_length,
-                motion_attention_mask=motion_attention_mask,
-            ) + hidden_states
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        video_length=None,
+        motion_attention_mask=None,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
+        if frame_window_size and frame_window_stride:
+            views = get_views(video_length, frame_window_size, frame_window_stride)
+            hidden_states = rearrange(hidden_states, "(b f) d c -> b f d c", f=video_length)
+            count = torch.zeros_like(hidden_states)
+            value = torch.zeros_like(hidden_states)
+            for t_start, t_end in views:
+                weight_sequence = generate_weight_sequence(t_end - t_start)
+                weight_tensor = torch.ones_like(count[:, t_start:t_end])
+                weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(hidden_states.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+
+                sub_hidden_states = rearrange(hidden_states[:, t_start:t_end], "b f d c -> (b f) d c")
+                for attention_block, norm in zip(self.attention_blocks, self.norms):
+                    norm_hidden_states = norm(sub_hidden_states)
+                    sub_hidden_states = attention_block(
+                        norm_hidden_states,
+                        encoder_hidden_states=encoder_hidden_states if attention_block.is_cross_attention else None,
+                        video_length=t_end-t_start,
+                    ) + sub_hidden_states
+                sub_hidden_states = rearrange(sub_hidden_states, "(b f) d c -> b f d c", f=t_end-t_start)
+
+                value[:,t_start:t_end] += sub_hidden_states * weight_tensor
+                count[:,t_start:t_end] += weight_tensor
+
+            hidden_states = torch.where(count>0, value/count, value)
+            hidden_states = rearrange(hidden_states, "b f d c -> (b f) d c") 
+        else:
+            for attention_block, norm in zip(self.attention_blocks, self.norms):
+                norm_hidden_states = norm(hidden_states)
+                hidden_states = attention_block(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states if attention_block.is_cross_attention else None,
+                    video_length=video_length,
+                    motion_attention_mask=motion_attention_mask,
+                ) + hidden_states
             
         hidden_states = self.ff(self.ff_norm(hidden_states)) + hidden_states
         
@@ -270,14 +364,14 @@ class PositionalEncoding(nn.Module):
 
 class VersatileAttention(Attention):
     def __init__(
-            self,
-            attention_mode                     = None,
-            cross_frame_attention_mode         = None,
-            temporal_position_encoding         = False,
-            temporal_position_encoding_max_len = 24,
-            attention_scale_multiplier         = 1.0,
-            *args, **kwargs
-        ):
+        self,
+        attention_mode                     = None,
+        cross_frame_attention_mode         = None,
+        temporal_position_encoding         = False,
+        temporal_position_encoding_max_len = 24,
+        attention_scale_multiplier         = 1.0,
+        *args, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         assert attention_mode == "Temporal"
 
@@ -310,7 +404,14 @@ class VersatileAttention(Attention):
     def extra_repr(self):
         return f"(Module Info) Attention_Mode: {self.attention_mode}, Is_Cross_Attention: {self.is_cross_attention}"
 
-    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, video_length=None, motion_attention_mask=None):
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        video_length=None,
+        motion_attention_mask=None
+    ):
         batch_size, sequence_length, _ = hidden_states.shape
 
         if self.attention_mode == "Temporal":

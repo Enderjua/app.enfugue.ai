@@ -4,7 +4,7 @@ import os
 import numpy as np
 import requests
 
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 from typing import Iterator, Any, TYPE_CHECKING
 
@@ -19,12 +19,12 @@ if TYPE_CHECKING:
 
 __all__ = ["BackgroundRemover"]
 
-class BackgroundRemoverImageProcessor(SupportModelImageProcessor):
+class BackgroundRemoverProcessor(SupportModelProcessor):
     """
     Used to detect line art
     """
     def __init__(self, model: Net, device: torch.device, **kwargs: Any) -> None:
-        super(BackgroundRemoverImageProcessor, self).__init__(**kwargs)
+        super(BackgroundRemoverProcessor, self).__init__(**kwargs)
         self.model = model
         self.device = device
 
@@ -68,7 +68,7 @@ class BackgroundRemover(SupportModel):
             return target_model
 
     @contextmanager
-    def remover(self) -> Iterator[BackgroundRemoverImageProcessor]:
+    def remover(self) -> Iterator[BackgroundRemoverProcessor]:
         """
         Runs the background remover on an image.
         """
@@ -76,7 +76,7 @@ class BackgroundRemover(SupportModel):
         with self.context():
             net = Net("u2net", self.u2net_model_path)
             net.to(self.device)
-            processor = BackgroundRemoverImageProcessor(net, self.device)
+            processor = BackgroundRemoverProcessor(net, self.device)
             yield processor
             del processor
             del net

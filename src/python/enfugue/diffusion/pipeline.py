@@ -30,6 +30,8 @@ import torchvision
 import numpy as np
 import safetensors.torch
 
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from contextlib import contextmanager
 from omegaconf import OmegaConf
 from compel import ReturnedEmbeddingsType
@@ -302,6 +304,7 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
         is_sdxl: bool,
         is_inpainter: bool,
         task_callback: Optional[Callable[[str], None]]=None,
+        use_lora_compatible_layers: bool=True,
         **kwargs: Any
     ) -> ModelMixin:
         """
@@ -339,6 +342,7 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
         task_callback: Optional[Callable[[str], None]]=None,
         position_encoding_truncate_length: Optional[int]=None,
         position_encoding_scale_length: Optional[int]=None,
+        use_lora_compatible_layers: bool=True,
         **kwargs: Any,
     ) -> EnfugueStableDiffusionPipeline:
         """
@@ -550,8 +554,9 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             task_callback=task_callback,
             position_encoding_truncate_length=position_encoding_truncate_length,
             position_encoding_scale_length=position_encoding_scale_length,
+            use_lora_compatible_layers=use_lora_compatible_layers,
             **unet_kwargs
-    	)
+        )
 
         if is_segmind:
             # Add middle blocks back in temporarily
@@ -573,7 +578,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
 
         unet_keys = len(list(converted_unet_checkpoint.keys()))
         logger.debug(f"Loading {unet_keys} keys into UNet state dict (non-strict)")
-
         unet.load_state_dict(converted_unet_checkpoint, strict=False)
 
         # Convert the VAE model.
@@ -592,16 +596,12 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 vae_scale_factor = 0.18215  # default SD scaling factor
 
             vae_config["scaling_factor"] = vae_scale_factor
-
-            vae = AutoencoderKL(**vae_config)
+            with init_empty_weights():
+                vae = AutoencoderKL(**vae_config)
             vae_keys = len(list(converted_vae_checkpoint.keys()))
             logger.debug(f"Loading {vae_keys} keys into Autoencoder state dict (strict). Autoencoder scale is {vae_config['scaling_factor']}")
-            vae.load_state_dict(converted_vae_checkpoint)
-
-        if offload_models:
-            logger.debug("Offloading enabled; sending VAE to CPU")
-            vae.to("cpu")
-            empty_cache()
+            for key, value in converted_vae_checkpoint.items():
+                set_module_tensor_to_device(vae, key, "cpu", value=value)
 
         if load_safety_checker:
             safety_checker_path = "CompVis/stable-diffusion-safety-checker"
@@ -610,10 +610,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 safety_checker_path,
                 cache_dir=cache_dir
             )
-            if offload_models:
-                logger.debug("Offloading enabled; sending safety checker to CPU")
-                safety_checker.to("cpu")
-                empty_cache()
             task_callback(f"Initializing feature extractor from repository {safety_checker_path}")
             feature_extractor = AutoFeatureExtractor.from_pretrained(
                 safety_checker_path,
@@ -641,10 +637,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 tokenizer_path,
                 subfolder="text_encoder"
             )
-            if offload_models:
-                logger.debug("Offloading enabled; sending text encoder to CPU")
-                text_model.to("cpu")
-                empty_cache()
 
             kwargs["text_encoder_2"] = None
             kwargs["tokenizer_2"] = None
@@ -671,10 +663,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             )
 
             text_model = convert_ldm_clip_checkpoint(checkpoint)
-            if offload_models:
-                logger.debug("Offloading enabled; sending text encoder to CPU")
-                text_model.to("cpu")
-                empty_cache()
 
             kwargs["text_encoder_2"] = None
             kwargs["tokenizer_2"] = None
@@ -742,12 +730,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 projection_dim=1280,
             )
 
-            if offload_models:
-                logger.debug("Offloading enabled; sending text encoder 1 and 2 to CPU")
-                text_encoder.to("cpu")
-                text_encoder_2.to("cpu")
-                empty_cache()
-
             pipe = cls(
                 vae=vae,
                 vae_preview=vae_preview,
@@ -777,11 +759,6 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 has_projection=True,
                 projection_dim=1280,
             )
-
-            if offload_models:
-                logger.debug("Offloading enabled; sending text encoder 2 to CPU")
-                text_encoder_2.to("cpu")
-                empty_cache()
 
             pipe = cls(
                 vae=vae,
@@ -904,8 +881,11 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                     controlnet_state_dict.pop(key)
         else:
             # Check if we need to adjust PE tensors
-            scale_length = getattr(self.unet, "position_encoding_scale_length")
-            truncate_length = getattr(self.unet, "position_encoding_truncate_length")
+            scale_length = getattr(self.unet, "position_encoding_scale_length", None)
+            truncate_length = getattr(self.unet, "position_encoding_truncate_length", None)
+            default_length = getattr(self.unet, "default_position_encoding_length", None)
+            if default_length and default_length > 32:
+                scale_length = default_length
 
             if scale_length or truncate_length:
                 logger.info(f"Adjusting ControlNet position encoder tensors, will truncate to length '{truncate_length}' and/or scale to length '{scale_length}'")
@@ -1363,6 +1343,7 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
         state_dict = load_state_dict(pretrained_model_name_or_path_or_dict) # type: ignore[arg-type]
         while "state_dict" in state_dict:
             state_dict = state_dict["state_dict"] # type: ignore[assignment]
+
         state_dict.pop("animatediff_config", "")
         if any(["motion_module" in key for key in state_dict.keys()]):
             return self.load_motion_lora_weights(
@@ -1582,6 +1563,19 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             dtype=dtype
         )
 
+        if animation_frames and self.frame_window_size and self.frame_window_stride:
+            # FreeNoise
+            for i in range(self.frame_window_size, animation_frames, self.frame_window_stride):
+                indexes_start = i - self.frame_window_size
+                indexes_end = i + self.frame_window_stride - self.frame_window_size
+                indexes = torch.randperm(
+                    indexes_end-indexes_start,
+                    generator=generator,
+                    device=torch.device(device) if isinstance(device, str) else device,
+                )
+                indexes += indexes_start
+                random_latents[:, :, i:i+self.frame_window_stride] = random_latents[:, :, indexes]
+
         return random_latents * self.scheduler.init_noise_sigma # type: ignore[attr-defined]
 
     def encode_image_unchunked(
@@ -1758,6 +1752,18 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                 device=torch.device(device) if isinstance(device, str) else device,
                 dtype=dtype
             )
+            if animation_frames and self.frame_window_size and self.frame_window_stride:
+                # FreeNoise
+                for i in range(self.frame_window_size, animation_frames, self.frame_window_stride):
+                    indexes_start = i - self.frame_window_size
+                    indexes_end = i + self.frame_window_stride - self.frame_window_size
+                    indexes = torch.randperm(
+                        indexes_end-indexes_start,
+                        generator=generator,
+                        device=torch.device(device) if isinstance(device, str) else device,
+                    )
+                    indexes += indexes_start
+                    noise[:, :, i:i+self.frame_window_stride] = noise[:, :, indexes]
             return self.scheduler.add_noise(latents, noise, timestep) # type: ignore[attr-defined]
         else:
             return latents
@@ -1956,6 +1962,9 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             kwargs["added_cond_kwargs"] = added_cond_kwargs
         if motion_attention_mask is not None:
             kwargs["motion_attention_mask"] = motion_attention_mask
+        if len(latents.shape) == 5:
+            kwargs["frame_window_size"] = self.frame_window_size
+            kwargs["frame_window_stride"] = self.frame_window_stride
         return self.unet(
             latents,
             timestep,
@@ -3709,8 +3718,8 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             size=self.tiling_size if self.tiling_size else 1024 if self.is_sdxl else 512,
             stride=self.tiling_stride,
             frames=animation_frames,
-            frame_size=self.frame_window_size,
-            frame_stride=self.frame_window_stride,
+            frame_size=self.frame_window_size if loop else None,
+            frame_stride=self.frame_window_stride if loop else None,
             loop=loop,
             tile=tile,
         )
@@ -3852,6 +3861,9 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
             encoded_prompt_list = []
             # Iterate over given prompts and encode
             for given_prompt in prompts:
+                if isinstance(given_prompt, dict):
+                    given_prompt = Prompt(**given_prompt)
+
                 if self.is_sdxl:
                     # XL uses more inputs for prompts than 1.5
                     (
@@ -4489,21 +4501,8 @@ class EnfugueStableDiffusionPipeline(StableDiffusionPipeline):
                         dtype=torch.float32 if self.config.force_full_precision_vae else prepared_latents.dtype, # type: ignore[attr-defined]
                         device=device
                     )
-                    if self.is_sdxl:
-                        use_torch_2_0_or_xformers = self.vae.decoder.mid_block.attentions[0].processor in [ # type: ignore[union-attr]
-                            AttnProcessor2_0,
-                            XFormersAttnProcessor,
-                            LoRAXFormersAttnProcessor,
-                            LoRAAttnProcessor2_0,
-                        ]
-                        # if xformers or torch_2_0 is used attention block does not need
-                        # to be in float32 which can save lots of memory
-                        if not use_torch_2_0_or_xformers:
-                            self.vae.post_quant_conv.to(prepared_latents.dtype)
-                            self.vae.decoder.conv_in.to(prepared_latents.dtype)
-                            self.vae.decoder.mid_block.to(prepared_latents.dtype) # type: ignore
-                        else:
-                            prepared_latents = prepared_latents.float()
+                    if self.config.force_full_precision_vae:
+                        prepared_latents = prepared_latents.to(torch.float32)
 
                 if output_type == "latent":
                     output = prepared_latents # type: ignore[assignment]

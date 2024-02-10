@@ -92,14 +92,6 @@ __all__ = [
     "UPSCALE_LITERAL",
     "MASK_TYPE_LITERAL",
     "LOOP_TYPE_LITERAL",
-    "DEFAULT_CHECKPOINT_DIR",
-    "DEFAULT_INVERSION_DIR",
-    "DEFAULT_LORA_DIR",
-    "DEFAULT_LYCORIS_DIR",
-    "DEFAULT_TENSORRT_DIR",
-    "DEFAULT_CACHE_DIR",
-    "DEFAULT_OTHER_DIR",
-    "DEFAULT_DIFFUSERS_DIR",
     "DEFAULT_SIZE",
     "DEFAULT_SDXL_SIZE",
     "DEFAULT_TEMPORAL_SIZE",
@@ -128,7 +120,19 @@ __all__ = [
     "NOISE_METHOD_LITERAL",
     "IP_ADAPTER_LITERAL",
     "ANIMATION_ENGINE_LITERAL",
-    "OPTICAL_FLOW_METHOD_LITERAL"
+    "OPTICAL_FLOW_METHOD_LITERAL",
+    "SD1_CONFIG_URL",
+    "SD2_CONFIG_URL",
+    "SDXL_CONFIG_URL",
+    "SDXL_REFINER_CONFIG_URL",
+    "SD_UPSCALE_CONFIG_URL",
+    "CONTROLNET_CONFIG_URL",
+    "SDXL_VAE_CONFIG_URL",
+    "SD_VAE_CONFIG_URL",
+    "KEY_VAE_DIFFUSERS",
+    "KEY_XL_VAE_DIFFUSERS",
+    "KEY_VAE_UPDATES",
+    "VALUE_VAE_UPDATES"
 ]
 
 DEFAULT_MODEL = "https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned.ckpt"
@@ -143,15 +147,6 @@ PLAYGROUND_V2_MODEL = "https://huggingface.co/playgroundai/playground-v2-1024px-
 SEGMIND_VEGA_MODEL = "https://huggingface.co/segmind/Segmind-Vega/resolve/main/segmind-vega.safetensors"
 SDXL_TURBO_MODEL = "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
 ANIMAGINE_MODEL = "https://huggingface.co/cagliostrolab/animagine-xl-3.0/resolve/main/animagine-xl-3.0.safetensors"
-
-DEFAULT_CHECKPOINT_DIR = os.path.expanduser("~/.cache/enfugue/checkpoint")
-DEFAULT_INVERSION_DIR = os.path.expanduser("~/.cache/enfugue/inversion")
-DEFAULT_TENSORRT_DIR = os.path.expanduser("~/.cache/enfugue/tensorrt")
-DEFAULT_LORA_DIR = os.path.expanduser("~/.cache/enfugue/lora")
-DEFAULT_LYCORIS_DIR = os.path.expanduser("~/.cache/enfugue/lycoris")
-DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/enfugue/cache")
-DEFAULT_DIFFUSERS_DIR = os.path.expanduser("~/.cache/enfugue/diffusers")
-DEFAULT_OTHER_DIR = os.path.expanduser("~/.cache/enfugue/other")
 
 DEFAULT_SIZE = 512
 DEFAULT_TILING_SIZE = 512
@@ -243,6 +238,18 @@ OPTICAL_FLOW_METHOD_LITERAL = Literal[
     "lucas-kanade", "dense-lucas-kanade", "farneback", "rlof", "unimatch"
 ]
 
+# Original config files
+SD1_CONFIG_URL = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/configs/stable-diffusion/v1-inference.yaml"
+SD2_CONFIG_URL = "https://raw.githubusercontent.com/Stability-AI/stablediffusion/main/configs/stable-diffusion/v2-inference-v.yaml"
+SDXL_CONFIG_URL = "https://raw.githubusercontent.com/Stability-AI/generative-models/main/configs/inference/sd_xl_base.yaml"
+SDXL_REFINER_CONFIG_URL = "https://raw.githubusercontent.com/Stability-AI/generative-models/main/configs/inference/sd_xl_refiner.yaml"
+SD_UPSCALE_CONFIG_URL = "https://raw.githubusercontent.com/Stability-AI/stablediffusion/main/configs/stable-diffusion/x4-upscaling.yaml"
+CONTROLNET_CONFIG_URL = "https://raw.githubusercontent.com/lllyasviel/ControlNet/main/models/cldm_v15.yaml"
+
+# Diffusers config URLs
+SD_VAE_CONFIG_URL = "https://huggingface.co/stabilityai/sd-vae-ft-ema/raw/main/config.json"
+SDXL_VAE_CONFIG_URL = "https://huggingface.co/stabilityai/sdxl-vae/raw/main/config.json"
+
 # VAE repos/files
 VAE_EMA = "https://huggingface.co/stabilityai/sd-vae-ft-ema/resolve/main/diffusion_pytorch_model.safetensors?filename=sd-vae-ft-ema.safetensors"
 VAE_MSE = "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.safetensors?filename=sd-vae-ft-mse.safetensors"
@@ -299,6 +306,11 @@ DPO_OFFSET = "https://huggingface.co/benjamin-paine/sd-dpo-offsets/resolve/main/
 DPO_OFFSET_XL = "https://huggingface.co/benjamin-paine/sd-dpo-offsets/resolve/main/sd_xl_unet_dpo_offset_v1.safetensors"
 
 OFFSET_LORA_XL = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_offset_example-lora_1.0.safetensors"
+
+KEY_VAE_DIFFUSERS = "decoder.mid_block.attentions.0.value.bias"
+KEY_XL_VAE_DIFFUSERS = "encoder.mid_block.attentions.0.to_q.weight"
+KEY_VAE_UPDATES = "model_ema.num_updates"
+VALUE_VAE_UPDATES = 500000 # Number of updates, > = xl, < = 1.5
 
 MultiModelType = Union[str, List[str]]
 WeightedMultiModelType = Union[

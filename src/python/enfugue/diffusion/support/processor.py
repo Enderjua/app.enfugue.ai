@@ -5,7 +5,7 @@ from typing import Iterator, Tuple, Callable, Optional, TYPE_CHECKING
 from contextlib import contextmanager, ExitStack
 
 from enfugue.diffusion.constants import CONTROLNET_LITERAL
-from enfugue.diffusion.support.model import SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModelProcessor
 
 if TYPE_CHECKING:
     import torch
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from enfugue.diffusion.support.line import LineDetector
     from enfugue.diffusion.support.pose import PoseDetector
 
-class PassThroughImageProcessor(SupportModelImageProcessor):
+class PassThroughImageProcessor(SupportModelProcessor):
     """
     Does not process an image.
     """
@@ -43,7 +43,7 @@ class ControlImageProcessor:
         self.offline = offline
 
     @contextmanager
-    def processors(self, *controlnets: CONTROLNET_LITERAL) -> Iterator[Tuple[SupportModelImageProcessor, ...]]:
+    def processors(self, *controlnets: CONTROLNET_LITERAL) -> Iterator[Tuple[SupportModelProcessor, ...]]:
         """
         Gets any number of controlnet processors in context.
         """
@@ -62,7 +62,7 @@ class ControlImageProcessor:
             ])
 
     @contextmanager
-    def processor(self, controlnet: CONTROLNET_LITERAL) -> Iterator[SupportModelImageProcessor]:
+    def processor(self, controlnet: CONTROLNET_LITERAL) -> Iterator[SupportModelProcessor]:
         """
         Gets one controlnet processor in context.
         """

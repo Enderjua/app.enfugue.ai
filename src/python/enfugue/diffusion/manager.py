@@ -63,7 +63,8 @@ if TYPE_CHECKING:
         Conversation,
         DragAnimatorPipeline,
         Unimatch,
-        FaceAnalyzer
+        FaceAnalyzer,
+        AudioSupportModel,
     )
     from torch import Tensor
 
@@ -238,6 +239,11 @@ class DiffusionPipelineManager:
         """
         import huggingface_hub
         import huggingface_hub.file_download
+
+        # Login
+        hf_token = self.configuration.get("enfugue.token.huggingface", None)
+        if hf_token:
+            huggingface_hub.login(token=hf_token)
 
         huggingface_http_get = huggingface_hub.file_download.http_get
 
@@ -617,7 +623,7 @@ class DiffusionPipelineManager:
         Gets the configured VAE (or None.)
         """
         if not hasattr(self, "_vae"):
-            self._vae = self.get_vae(self.vae_name)
+            self._vae = self.get_vae(self.vae_name, self.is_sdxl)
         return self._vae
 
     @vae.setter
@@ -643,7 +649,7 @@ class DiffusionPipelineManager:
                 vae_path = self.check_download_model(self.engine_vae_dir, new_vae)
 
                 self._vae_name = os.path.basename(vae_path)
-                self._vae = self.get_vae(vae_path)
+                self._vae = self.get_vae(vae_path, self.is_sdxl)
 
                 if self.tensorrt_is_ready and "vae" in self.TENSORRT_STAGES:
                     self.unload_pipeline("VAE changing")
@@ -670,7 +676,7 @@ class DiffusionPipelineManager:
         Gets the configured refiner VAE (or None.)
         """
         if not hasattr(self, "_refiner_vae"):
-            self._refiner_vae = self.get_vae(self.refiner_vae_name)
+            self._refiner_vae = self.get_vae(self.refiner_vae_name, self.refiner_is_sdxl)
         return self._refiner_vae
 
     @refiner_vae.setter
@@ -695,7 +701,7 @@ class DiffusionPipelineManager:
             else:
                 vae_path = self.check_download_model(self.engine_vae_dir, new_vae)
                 self._refiner_vae_name = new_vae
-                self._refiner_vae = self.get_vae(vae_path)
+                self._refiner_vae = self.get_vae(vae_path, self.refiner_is_sdxl)
                 if self.refiner_tensorrt_is_ready and "vae" in self.TENSORRT_STAGES:
                     self.unload_refiner("VAE changing")
                 elif hasattr(self, "_refiner_pipeline"):
@@ -721,7 +727,7 @@ class DiffusionPipelineManager:
         Gets the configured inpainter VAE (or None.)
         """
         if not hasattr(self, "_inpainter_vae"):
-            self._inpainter_vae = self.get_vae(self.inpainter_vae_name)
+            self._inpainter_vae = self.get_vae(self.inpainter_vae_name, self.inpainter_is_sdxl)
         return self._inpainter_vae
 
     @inpainter_vae.setter
@@ -746,7 +752,7 @@ class DiffusionPipelineManager:
             else:
                 vae_path = self.check_download_model(self.engine_vae_dir, new_vae)
                 self._inpainter_vae_name = new_vae
-                self._inpainter_vae = self.get_vae(vae_path)
+                self._inpainter_vae = self.get_vae(vae_path, self.inpainter_is_sdxl)
                 if self.inpainter_tensorrt_is_ready and "vae" in self.TENSORRT_STAGES:
                     self.unload_inpainter("VAE changing")
                 elif hasattr(self, "_inpainter_pipeline"):
@@ -772,7 +778,7 @@ class DiffusionPipelineManager:
         Gets the configured animator VAE (or None.)
         """
         if not hasattr(self, "_animator_vae"):
-            self._animator_vae = self.get_vae(self.animator_vae_name)
+            self._animator_vae = self.get_vae(self.animator_vae_name, self.animator_is_sdxl)
         return self._animator_vae
 
     @animator_vae.setter
@@ -797,7 +803,7 @@ class DiffusionPipelineManager:
             else:
                 vae_path = self.check_download_model(self.engine_vae_dir, new_vae)
                 self._animator_vae_name = new_vae
-                self._animator_vae = self.get_vae(vae_path)
+                self._animator_vae = self.get_vae(vae_path, self.animator_is_sdxl)
                 if self.animator_tensorrt_is_ready and "vae" in self.TENSORRT_STAGES:
                     self.unload_animator("VAE changing")
                 elif hasattr(self, "_animator_pipeline"):
@@ -1271,6 +1277,21 @@ class DiffusionPipelineManager:
             return path
         else:
             return check_make_directory_by_names(self.engine_root, "interpolation")
+
+    @property
+    def engine_audio_dir(self) -> str:
+        """
+        Gets where audio models are saved.
+        """
+        path = self.configuration.get("enfugue.engine.audio", None)
+        if path is not None:
+            if path.startswith("~"):
+                path = os.path.expanduser(path)
+            path = os.path.realpath(path)
+            check_make_directory(path)
+            return path
+        else:
+            return check_make_directory_by_names(self.engine_root, "audio")
 
     @property
     def model_tensorrt_dir(self) -> str:
@@ -2751,8 +2772,10 @@ class DiffusionPipelineManager:
             new_dtype = torch.half
         elif new_dtype == "float32" or new_dtype == "float":
             new_dtype = torch.float
+        elif new_dtype == "bfloat16":
+            new_dtype = torch.bfloat16
         else:
-            raise ConfigurationError("dtype incorrectly configured, use 'float16/half' or 'float32/float'")
+            raise ConfigurationError("dtype incorrectly configured, use 'float16/half', 'float32/float', 'bfloat16' or 'bfloat32'")
 
         if getattr(self, "_torch_dtype", new_dtype) != new_dtype:
             self.unload_pipeline("data type changing")
@@ -4355,6 +4378,23 @@ class DiffusionPipelineManager:
             self._face_analyzer.task_callback = self.task_callback
         return self._face_analyzer
 
+    @property
+    def audio(self) -> AudioSupportModel:
+        """
+        Gets the audio model.
+        """
+        if not hasattr(self, "_audio_model"):
+            from enfugue.diffusion.support import AudioSupportModel
+            self._audio_model = AudioSupportModel(
+                self.engine_root,
+                self.engine_audio_dir,
+                device=self.device,
+                dtype=self.dtype,
+                offline=self.offline
+            )
+            self._audio_model.task_callback = self.task_callback
+        return self._audio_model
+
     # Diffusers model getters
 
     def get_vae_path(self, vae: Optional[str] = None) -> Optional[str]:
@@ -4383,27 +4423,10 @@ class DiffusionPipelineManager:
                 return default
         return vae
 
-    def get_xl_vae(self, vae: str) -> AutoencoderKL:
-        """
-        Loads an XL VAE from file or dies trying
-        """
-        from diffusers.models import AutoencoderKL
-        from enfugue.diffusion.util.torch_util import load_state_dict
-
-        vae_config = os.path.join(self.engine_cache_dir, "sdxl-vae-config.json")
-        check_download(
-            "https://huggingface.co/stabilityai/sdxl-vae/raw/main/config.json",
-            vae_config
-        )
-        vae_model = AutoencoderKL.from_config(
-            AutoencoderKL._dict_from_json_file(vae_config)
-        )
-        vae_model.load_state_dict(load_state_dict(vae), strict=False)
-        return vae_model.to(self.device)
-
     def get_vae(
         self,
-        vae: Optional[str] = None
+        vae: Optional[str] = None,
+        is_sdxl: bool = False
     ) -> Optional[Union[AutoencoderKL, ConsistencyDecoderVAE]]:
         """
         Loads the VAE
@@ -4411,23 +4434,83 @@ class DiffusionPipelineManager:
         if vae is None:
             return None
 
+        from enfugue.diffusion.util.torch_util import load_state_dict
+        from accelerate import init_empty_weights
+        from accelerate.utils import set_module_tensor_to_device
+
         if "consisten" in vae.lower():
+            # There only exists a diffusers version of this model
             from diffusers.models import ConsistencyDecoderVAE
             vae_model = ConsistencyDecoderVAE
-        else:
-            from diffusers.models import AutoencoderKL
-            vae_model = AutoencoderKL
-
-        try:
-            result = vae_model.from_single_file(
-                vae,
-                torch_dtype=self.dtype,
-                cache_dir=self.engine_cache_dir,
-                from_safetensors="safetensors" in vae
+            vae_config = os.path.join(self.engine_cache_dir, "consistency-decoder-config.json")
+            check_download(
+                "https://huggingface.co/openai/consistency-decoder/raw/main/config.json",
+                vae_config
             )
-        except KeyError as ex:
-            logger.debug(f"Received KeyError on '{ex}' when instantiating VAE from single file, trying to use XL VAE loader fix.")
-            result = self.get_xl_vae(vae)
+            result = ConsistencyDecoderVAE.from_config(ConsistencyDecoderVAE._dict_from_json_file(vae_config))
+            result.load_state_dict(load_state_dict(vae))
+            return result
+
+        from diffusers.models import AutoencoderKL
+        # load the state dict
+        state_dict = load_state_dict(vae)
+
+        # detect type
+        if KEY_VAE_DIFFUSERS in state_dict:
+            use_diffusers = True
+            is_sdxl = False
+        elif KEY_XL_VAE_DIFFUSERS in state_dict:
+            use_diffusers = True
+            is_sdxl = True
+        elif KEY_VAE_UPDATES in state_dict:
+            use_diffusers = False
+            is_sdxl = state_dict[KEY_VAE_UPDATES] > VALUE_VAE_UPDATES
+        else:
+            raise ValueError(f"Could not recognize VAE in file {vae}.")
+
+        # For logging
+        checkpoint_label = "SDXL" if is_sdxl else "SD 1.5"
+            
+        # Build a diffusers VAE
+        if use_diffusers:
+            logger.debug(f"VAE {vae} is a diffusers-style {checkpoint_label} VAE checkpoint.")
+            # Load the diffusers config
+            if is_sdxl:
+                config = os.path.join(self.engine_cache_dir, "sdxl-vae-config.json")
+                check_download(SDXL_VAE_CONFIG_URL, config)
+            else:
+                config = os.path.join(self.engine_cache_dir, "sd-vae-config.json")
+                check_download(SD_VAE_CONFIG_URL, config)
+            result = AutoencoderKL.from_config(AutoencoderKL._dict_from_json_file(config))
+            result.load_state_dict(state_dict, strict=False)
+            return result
+
+        # CompVis/Stability, get original config and convert
+        if is_sdxl:
+            original_config = os.path.join(self.engine_cache_dir, "sd_xl_base.yaml")
+            check_download(SDXL_CONFIG_URL, original_config)
+        else:
+            original_config = os.path.join(self.engine_cache_dir, "v1-inference.yaml")
+            check_download(SD1_CONFIG_URL, original_config)
+        # Import diffusers utilities
+        from diffusers.loaders.single_file_utils import (
+            create_vae_diffusers_config,
+            convert_ldm_vae_checkpoint
+        )
+        from pibble.util.files import load_yaml
+        original_config = load_yaml(original_config)
+        scaling_factor = original_config.get("model", {}).get("params", {}).get("scale_factor", 0.18215)
+        config = create_vae_diffusers_config(
+            original_config,
+            image_size=1024 if is_sdxl else 512,
+            scaling_factor=scaling_factor
+        )
+        logger.debug(f"VAE {vae} is a stability-style {checkpoint_label} VAE checkpoint.")
+        state_dict = convert_ldm_vae_checkpoint(state_dict, config)
+        with init_empty_weights():
+            result = AutoencoderKL(**config)
+        for key, value in state_dict.items():
+            set_module_tensor_to_device(result, key, "cpu", value=value)
 
         return result
 
@@ -4531,7 +4614,7 @@ class DiffusionPipelineManager:
         Gets an SVD pipeline. This should eventually not be separate.
         """
         from diffusers import StableVideoDiffusionPipeline
-        path = "stabilityai/stable-video-diffusion-img2vid-xt" if use_xt else "stabilityai/stable-video-diffusion-img2vid"
+        path = "stabilityai/stable-video-diffusion-img2vid-xt-1-1" if use_xt else "stabilityai/stable-video-diffusion-img2vid"
         self.task_callback(f"Initializing SVD pipeline from {path}")
         pipe = StableVideoDiffusionPipeline.from_pretrained(
             path,

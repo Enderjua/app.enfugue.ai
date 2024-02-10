@@ -31,24 +31,23 @@ class Transformer3DModelOutput(BaseOutput):
 
 
 class Transformer3DModel(Transformer2DModel):
-
     def __init__(self, *args, **kwargs):
         super(Transformer3DModel, self).__init__(*args, **kwargs)
         nn.init.zeros_(self.proj_out.weight.data)
         nn.init.zeros_(self.proj_out.bias.data)
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            encoder_hidden_states: Optional[torch.Tensor] = None,
-            timestep: Optional[torch.LongTensor] = None,
-            class_labels: Optional[torch.LongTensor] = None,
-            cross_attention_kwargs: Dict[str, Any] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            encoder_attention_mask: Optional[torch.Tensor] = None,
-            enable_temporal_layers: bool = True,
-            positional_embedding: Optional[torch.Tensor] = None,
-            return_dict: bool = True,
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+        cross_attention_kwargs: Dict[str, Any] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        enable_temporal_layers: bool = True,
+        positional_embedding: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
     ):
 
         is_video = len(hidden_states.shape) == 5
@@ -58,14 +57,16 @@ class Transformer3DModel(Transformer2DModel):
             hidden_states = rearrange(hidden_states, "b c f h w -> (b f) c h w")
             encoder_hidden_states = repeat(encoder_hidden_states, 'b n c -> (b f) n c', f=f)
 
-        hidden_states = super(Transformer3DModel, self).forward(hidden_states,
-                                                                encoder_hidden_states,
-                                                                timestep,
-                                                                class_labels,
-                                                                cross_attention_kwargs,
-                                                                attention_mask,
-                                                                encoder_attention_mask,
-                                                                return_dict=False)[0]
+        hidden_states = super(Transformer3DModel, self).forward(
+            hidden_states,
+            encoder_hidden_states,
+            timestep,
+            class_labels,
+            cross_attention_kwargs,
+            attention_mask,
+            encoder_attention_mask,
+            return_dict=False
+        )[0]
 
         if is_video:
             hidden_states = rearrange(hidden_states, "(b f) c h w -> b c f h w", f=f)

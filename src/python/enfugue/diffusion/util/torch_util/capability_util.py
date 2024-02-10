@@ -111,6 +111,7 @@ def debug_tensors(*args: Any, **kwargs: Any) -> None:
     """
     import torch
     from enfugue.util import logger
+    include_bounds = kwargs.pop("include_bounds", False)
     arg_dict = dict([
         (f"arg_{i}", arg)
         for i, arg in enumerate(args)
@@ -124,5 +125,8 @@ def debug_tensors(*args: Any, **kwargs: Any) -> None:
                 for k, v in value.items():
                     debug_tensors(**{f"{key}_{k}": v})
             elif isinstance(value, torch.Tensor):
-                t_min, t_max = value.aminmax()
-                logger.debug(f"{key} = {value.shape} ({value.dtype}) on {value.device}, min={t_min}, max={t_max}")
+                if include_bounds:
+                    t_min, t_max = value.aminmax()
+                    logger.debug(f"{key} = {value.shape} ({value.dtype}) on {value.device}, min={t_min}, max={t_max}")
+                else:
+                    logger.debug(f"{key} = {value.shape} ({value.dtype}) on {value.device}")

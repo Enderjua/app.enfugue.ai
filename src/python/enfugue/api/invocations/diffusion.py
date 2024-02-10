@@ -51,7 +51,6 @@ class DiffusionInvocationMonitor(InvocationMonitor):
         self.save = kwargs.get("save", True)
 
         self.video_format = kwargs.get("video_format", "mp4")
-        self.video_codec = kwargs.get("video_codec", "avc1")
         self.video_rate = kwargs.get("video_rate", 8.0)
 
     def start(self) -> None:
@@ -106,7 +105,6 @@ class DiffusionInvocationMonitor(InvocationMonitor):
                         Video(frames).save(
                             video_path,
                             rate=self.video_rate,
-                            encoder=self.video_codec
                         )
                         self.video_result = video_path
                     except Exception as ex:

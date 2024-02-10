@@ -8,7 +8,7 @@ from contextlib import contextmanager
 if TYPE_CHECKING:
     from PIL.Image import Image
 
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 __all__ = ["PoseDetector"]
 
@@ -19,7 +19,7 @@ class InstantiationException(Exception):
             exception
         ))
 
-class PoseImageProcessor(SupportModelImageProcessor):
+class PoseImageProcessor(SupportModelProcessor):
     """
     Uses a pose detector to detect human poses, hands, and faces
     """
@@ -88,7 +88,7 @@ class PoseDetector(SupportModel):
     DW_POSE_MODEL_PATH = "https://huggingface.co/wanghaofan/dw-ll_ucoco_384/resolve/main/dw-ll_ucoco_384.pth"
 
     @contextmanager
-    def dwpose(self) -> Iterator[SupportModelImageProcessor]:
+    def dwpose(self) -> Iterator[SupportModelProcessor]:
         """
         Gets and runs the DWPose detector.
         """
@@ -115,7 +115,7 @@ class PoseDetector(SupportModel):
                 raise
 
     @contextmanager
-    def openpose(self) -> Iterator[SupportModelImageProcessor]:
+    def openpose(self) -> Iterator[SupportModelProcessor]:
         """
         Gets and runs the OpenPose detector.
         """
@@ -137,7 +137,7 @@ class PoseDetector(SupportModel):
             del detector
 
     @contextmanager
-    def best(self) -> Iterator[SupportModelImageProcessor]:
+    def best(self) -> Iterator[SupportModelProcessor]:
         """
         Uses DWPose if available, otherwise uses OpenPose.
         """

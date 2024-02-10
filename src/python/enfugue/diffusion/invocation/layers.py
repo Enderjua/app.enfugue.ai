@@ -137,7 +137,7 @@ class LayeredInvocation:
     crop_inpaint: bool=True
     scale_inpaint: bool=True
     inpaint_feather: int=32
-    inpaint_upscale_amount: float=1.0
+    inpaint_upscale_amount: float=0.5
     outpaint: bool=True
     outpaint_dilate: int=4
     # Refining
@@ -167,7 +167,7 @@ class LayeredInvocation:
     detailer_controlnet: Optional[CONTROLNET_LITERAL]=None
     detailer_controlnet_scale: float=1.0
     detailer_switch_pipeline: bool=False
-    detailer_upscale_amount: float=1.0
+    detailer_upscale_amount: float=0.5
     upscale: Optional[Union[UpscaleStepDict, List[UpscaleStepDict]]]=None
     interpolate_frames: Optional[int]=None
     reflect: bool=False
@@ -2029,6 +2029,7 @@ class LayeredInvocation:
 
         from PIL import Image, ImageFilter
         from enfugue.diffusion.util import Video
+        from enfugue.diffusion.util.prompt_util import Prompt
 
         isolated_detail_masks = []
         isolated_bounding_boxes = []
@@ -2088,43 +2089,58 @@ class LayeredInvocation:
             return images, nsfw
 
         # We will be inpainting, first assemble our arguments
-        prompt = self.merge_prompts( # type: ignore[assignment]
-            (DEFAULT_UPSCALE_PROMPT, 1.0),
-            (self.prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
-            (self.model_prompt, MODEL_PROMPT_WEIGHT),
-            (self.refiner_prompt, MODEL_PROMPT_WEIGHT),
-            *[
-                (prompt_dict["positive"], GLOBAL_PROMPT_UPSCALE_WEIGHT)
-                for prompt_dict in (self.prompts if self.prompts is not None else [])
+        if self.prompts:
+            prompts = [
+                Prompt(
+                    positive=self.merge_prompts(
+                        (DEFAULT_UPSCALE_PROMPT, 1.0),
+                        (prompt["positive"], GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                        (self.model_prompt, MODEL_PROMPT_WEIGHT),
+                        (self.refiner_prompt, MODEL_PROMPT_WEIGHT),
+                    ),
+                    positive_2=None if not prompt.get("positive_2", None) else self.merge_prompts(
+                        (prompt["positive_2"], GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                        (self.model_prompt_2, MODEL_PROMPT_WEIGHT),
+                        (self.refiner_prompt_2, MODEL_PROMPT_WEIGHT),
+                    ),
+                    negative=self.merge_prompts(
+                        (prompt.get("negative", None), GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                        (self.model_negative_prompt, MODEL_PROMPT_WEIGHT),
+                        (self.refiner_negative_prompt, MODEL_PROMPT_WEIGHT),
+                    ),
+                    negative_2=None if not prompt.get("negative_2", None) else self.merge_prompts(
+                        (prompt["negative_2"], GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                        (self.model_negative_prompt_2, MODEL_PROMPT_WEIGHT),
+                        (self.refiner_negative_prompt_2, MODEL_PROMPT_WEIGHT),
+                    )
+                )
+                for prompt in self.prompts
             ]
-        )
-        prompt_2 = self.merge_prompts(
-            (self.prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
-            (self.model_prompt_2, MODEL_PROMPT_WEIGHT),
-            (self.refiner_prompt_2, MODEL_PROMPT_WEIGHT),
-            *[
-                (prompt_dict.get("positive_2", None), GLOBAL_PROMPT_UPSCALE_WEIGHT)
-                for prompt_dict in (self.prompts if self.prompts is not None else [])
-            ]
-        )
-        negative_prompt = self.merge_prompts(
-            (self.negative_prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
-            (self.model_negative_prompt, MODEL_PROMPT_WEIGHT),
-            (self.refiner_negative_prompt, MODEL_PROMPT_WEIGHT),
-            *[
-                (prompt_dict.get("negative", None), GLOBAL_PROMPT_UPSCALE_WEIGHT)
-                for prompt_dict in (self.prompts if self.prompts is not None else [])
-            ]
-        )
-        negative_prompt_2 = self.merge_prompts(
-            (self.negative_prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
-            (self.model_negative_prompt_2, MODEL_PROMPT_WEIGHT),
-            (self.refiner_negative_prompt_2, MODEL_PROMPT_WEIGHT),
-            *[
-                (prompt_dict.get("negative_2", None), GLOBAL_PROMPT_UPSCALE_WEIGHT)
-                for prompt_dict in (self.prompts if self.prompts is not None else [])
-            ]
-        )
+            prompt, prompt_2, negative_prompt, negative_prompt_2 = None, None, None, None
+        else:
+            prompts = None
+            prompt = self.merge_prompts( # type: ignore[assignment]
+                (DEFAULT_UPSCALE_PROMPT, 1.0),
+                (self.prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                (self.model_prompt, MODEL_PROMPT_WEIGHT),
+                (self.refiner_prompt, MODEL_PROMPT_WEIGHT),
+            )
+            prompt_2 = self.merge_prompts(
+                (self.prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                (self.model_prompt_2, MODEL_PROMPT_WEIGHT),
+                (self.refiner_prompt_2, MODEL_PROMPT_WEIGHT),
+            )
+            negative_prompt = self.merge_prompts(
+                (self.negative_prompt, GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                (self.model_negative_prompt, MODEL_PROMPT_WEIGHT),
+                (self.refiner_negative_prompt, MODEL_PROMPT_WEIGHT),
+            )
+            negative_prompt_2 = self.merge_prompts(
+                (self.negative_prompt_2, GLOBAL_PROMPT_UPSCALE_WEIGHT),
+                (self.model_negative_prompt_2, MODEL_PROMPT_WEIGHT),
+                (self.refiner_negative_prompt_2, MODEL_PROMPT_WEIGHT),
+            )
+
         guidance_scale = self.guidance_scale if self.detailer_guidance_scale is None else self.detailer_guidance_scale
         num_inference_steps = self.num_inference_steps if self.detailer_inference_steps is None else self.detailer_inference_steps
 
@@ -2134,7 +2150,8 @@ class LayeredInvocation:
 
         # Determine which pipeline we're going to be using
         use_inpainter = self.detailer_switch_pipeline or invocation_kwargs.get("mask", None) and not self.animation_frames
-        inpainter_ip_adapter = "plus-face-id"
+        #inpainter_ip_adapter = "plus-face-id"
+        inpainter_ip_adapter = None
         use_inpainter = False
 
         if use_inpainter:
@@ -2143,7 +2160,7 @@ class LayeredInvocation:
                 pipeline.inpainter_controlnets = self.detailer_controlnet # type: ignore[assignment]
             else:
                 pipeline.inpainter_controlnets = None # type: ignore[assignment]
-            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+            if inpainter_ip_adapter is not None and getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
                 pipeline.unload_inpainter("Setting IP Adapter Model")
                 pipeline._ip_adapter_model = inpainter_ip_adapter
             detail_pipeline = pipeline.inpainter_pipeline # type: ignore[assignment]
@@ -2153,7 +2170,7 @@ class LayeredInvocation:
                 pipeline.animator_controlnets = self.detailer_controlnet # type: ignore[assignment]
             else:
                 pipeline.animator_controlnets = None # type: ignore[assignment]
-            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+            if inpainter_ip_adapter is not None and getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
                 pipeline.unload_animator("Setting IP Adapter Model")
                 pipeline._ip_adapter_model = inpainter_ip_adapter
             detail_pipeline = pipeline.animator_pipeline # type: ignore[assignment]
@@ -2163,7 +2180,7 @@ class LayeredInvocation:
                 pipeline.controlnets = self.detailer_controlnet # type: ignore[assignment]
             else:
                 pipeline.controlnets = None # type: ignore[assignment]
-            if getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
+            if inpainter_ip_adapter is not None and getattr(pipeline, "_ip_adapter_model", None) != inpainter_ip_adapter:
                 pipeline.unload_pipeline("Setting IP Adapter Model")
                 pipeline._ip_adapter_model = inpainter_ip_adapter
             detail_pipeline = pipeline.pipeline # type: ignore[assignment]
@@ -2190,6 +2207,11 @@ class LayeredInvocation:
                 self.height,
                 isolated_bounding_boxes
             )
+            logger.info(f"GROUPS {grouped_boxes}")
+            logger.info("MASKS")
+            for f, frame in enumerate(isolated_detail_masks):
+                fl = len(frame)
+                logger.info(f"{f}/{fl}")
             for g, group in enumerate(grouped_boxes):
                 consecutive_hidden_frames = 0
                 current_frame_start = 0
@@ -2198,17 +2220,24 @@ class LayeredInvocation:
                 def maybe_add_frames():
                     nonlocal current_frames, current_frame_start
                     current_frames = current_frames[:max([i for i, v in enumerate(current_frames) if v]+[0])+1]
-                    if current_frames:
+                    if current_frames and len(current_frames) >= 4:
                         current_masks = []
                         x0, y0, x1, y1 = -1, -1, -1, -1
+                        logger.info(f"start {current_frame_start}")
                         for i, this_frame in enumerate(current_frames):
+                            if current_frame_start + i >= len(isolated_detail_masks):
+                                break
                             if this_frame is None:
                                 current_masks.append(Image.new("L", (width, height)))
                                 continue
                             mask_index, bounding_box = this_frame
-                            current_masks.append(
-                                isolated_detail_masks[current_frame_start+i][mask_index]
-                            )
+                            logger.info("index {0} maskindex {1}".format(current_frame_start+i, mask_index))
+                            if mask_index >= len(isolated_detail_masks[current_frame_start+i]):
+                                current_masks.append(Image.new("L", (width, height)))
+                            else:
+                                current_masks.append(
+                                    isolated_detail_masks[current_frame_start+i][mask_index]
+                                )
                             (bx0, by0), (bx1, by1) = bounding_box
                             x0 = bx0 if x0 == -1 else min(x0, bx0)
                             x1 = bx1 if x1 == -1 else max(x1, bx1)
@@ -2235,6 +2264,7 @@ class LayeredInvocation:
                         # Break
                         maybe_add_frames()
                         current_frame_start = index + 1
+
                 # Add the last group of frames if found
                 maybe_add_frames()
         else:
@@ -2252,7 +2282,7 @@ class LayeredInvocation:
                             overlap_area = (ox1 - ox0) * (oy1 - oy0)
                             box_area = (x01 - x00) * (y01 - y00)
                             other_box_area = (x11 - x10) * (y11 - y10)
-                            if overlap_area > min(box_area, other_box_area) * 0.33:
+                            if overlap_area > min(box_area, other_box_area) * 0.2:
                                 merged = True
                                 new_bbox = [(min(x00, x10), min(y00, y10)), (max(x01, x11), max(y01, y11))]
                                 white = Image.new(other_mask.mode, other_mask.size, (255,) if other_mask.mode == "L" else (255,255,255))
@@ -2304,24 +2334,58 @@ class LayeredInvocation:
                     for mask_img in mask
                 ]
             else:
-                mask.save("./before.png")
                 isolated_mask = dilate_erode(
                     self.extend_mask(mask, extend_up),
                     dilate_amount
                 )
-                isolated_mask.save("./after.png")
 
+            num_frame_masks = len(isolated_mask) if isinstance(isolated_mask, list) else 1
+            frame_end_index = frame_start_index + num_frame_masks
+            added_before = 0
+            added_after = 0
+
+            if num_frame_masks > 1:
+                logger.info(f"START: {frame_start_index}:{frame_end_index}")
+                frame_window_size = self.frame_window_size if self.frame_window_size else self.animation_frames
+                if frame_window_size and num_frame_masks < frame_window_size:
+                    frames_to_add = frame_window_size - num_frame_masks # 64 - 25 = 39
+                    added_after = frames_to_add
+                    frame_end_index = frame_start_index + num_frame_masks + frames_to_add
+                    if frame_end_index >= self.animation_frames:
+                        to_shift = min(frame_end_index - self.animation_frames, frame_start_index)
+                        frame_start_index -= to_shift
+                        frame_end_index -= to_shift
+                        added_before += to_shift
+                        added_after -= to_shift
+                if self.frame_window_size and self.frame_window_stride:
+                    # Make sure it's divisible by stride
+                    actual_frames = frame_end_index - frame_start_index
+                    stride_frames = (actual_frames // self.frame_window_stride) * self.frame_window_stride
+                    leftover = stride_frames - actual_frames
+                    logger.debug(f"ADDING {leftover} {frame_end_index} {frame_start_index} {frame_end_index-frame_start_index} {self.frame_window_stride}?")
+                    if leftover != 0:
+                        frame_end_index += leftover
+                        added_after += leftover
+                        if frame_end_index >= self.animation_frames:
+                            remainder = frame_end_index - self.animation_frames
+                            frame_end_index = self.animation_frames
+                            added_after -= remainder
+                            if remainder < frame_start_index:
+                                frame_start_index -= remainder
+                                added_before += remainder
+
+            logger.info(f"END: {frame_start_index}:{frame_end_index} ({added_before} before, {added_after} after)")
             isolated_control_images = None
             if len(control_images) > frame_start_index:
                 isolated_control_images = control_images
                 if not isinstance(mask, list):
-                    isolated_control_images = isolated_control_images[0]
+                    isolated_control_images = isolated_control_images[frame_start_index]
                 else:
-                    controlnet_name = next(isolated_control_images[0].keys())
-                    scale = isolated_control_images[0][controlnet_name][1]
+                    controlnet_name = next(isolated_control_images[frame_start_index].keys())
+                    scale = isolated_control_images[frame_start_index][controlnet_name][1]
                     controlnet_images = []
 
-                    for controlnet_dict in isolated_control_images:
+                    for controlnet_dict in isolated_control_images[frame_start_index:frame_end_index]:
                         controlnet_images.append(controlnet_dict[controlnet_name][0])
 
                     isolated_control_images = dict([
@@ -2331,20 +2395,20 @@ class LayeredInvocation:
             if isinstance(isolated_mask, list):
                 isolated_image = [
                     img.crop((x0, y0, x1, y1))
-                    for img in images
+                    for img in images[frame_start_index:frame_end_index]
                 ]
             else:
                 isolated_image = images[frame_start_index].crop((x0, y0, x1, y1))
-            isolated_image.save("./iso.png")
+
             if isinstance(isolated_mask, list):
                 isolated_mask = [
                     mask_img.crop((x0, y0, x1, y1))
                     for mask_img in isolated_mask
                 ]
                 isolated_mask = (
-                    ([Image.new("L", isolated_mask[0].size)] * frame_start_index) +
+                    ([Image.new("L", isolated_mask[0].size)] * added_before) +
                     isolated_mask +
-                    ([Image.new("L", isolated_mask[0].size)] * (len(images) - len(isolated_mask) - frame_start_index))
+                    ([Image.new("L", isolated_mask[0].size)] * added_after)
                 )
             else:
                 isolated_mask = isolated_mask.crop((x0, y0, x1, y1))
@@ -2397,6 +2461,7 @@ class LayeredInvocation:
                 "height": inference_height,
                 "image": isolated_image,
                 "mask": isolated_mask,
+                "prompts": prompts,
                 "prompt": prompt,
                 "prompt_2": prompt_2,
                 "negative_prompt": negative_prompt,
@@ -2421,6 +2486,8 @@ class LayeredInvocation:
                 "latent_callback_type": "pil",
             }
 
+            detail_kwargs["ip_adapter_images"] = invocation_kwargs.get("ip_adapter_images", None)
+            """
             # If the pipeline has an IP adapter, pass the image through that
             if detail_pipeline.ip_adapter_loaded:
                 # Extend the image crop up and to the sides to get hair for face ID
@@ -2428,11 +2495,16 @@ class LayeredInvocation:
                 ix1 = min(x1 + 16, width-1)
                 iy0 = max(y0 - 32, 0)
                 iy1 = min(y1 + 8, height-1)
-                ip_adapter_image = image.crop((ix0, iy0, ix1, iy1))
-                ip_adapter_image.save("./ip-adapter.png")
+                if isinstance(isolated_mask, list):
+                    ip_adapter_image = [
+                        image.crop((ix0, iy0, ix1, iy1))
+                        for image in images
+                    ]
+                else:
+                    ip_adapter_image = images[frame_start_index].crop((ix0, iy0, ix1, iy1))
                 logger.debug(f"Detail pipeline has IP adapter loaded, adding image to adapter input.")
                 detail_kwargs["ip_adapter_images"] = [(ip_adapter_image, self.detailer_inpaint_ip_adapter_scale)]
-
+            """
             inpaint_image_callback = None
             if image_callback is not None and image_callback_steps:
                 # Create resized callback
@@ -2452,7 +2524,8 @@ class LayeredInvocation:
 
                 inpaint_image_callback = resized_callback
 
-            logger.debug(f"Detailing pass {i} with arguments {detail_kwargs}")
+            logger.debug(f"Detailing pass {i} starting from image {frame_start_index+1} through {frame_end_index} with arguments {detail_kwargs}")
+
             pipeline.stop_keepalive()
             results = detail_pipeline( # type: ignore
                 latent_callback=inpaint_image_callback,

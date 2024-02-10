@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from PIL import Image
 
 from enfugue.diffusion.util import ComputerVision
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 if TYPE_CHECKING:
     from realesrgan import RealESRGANer
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Upscaler"]
 
-class ESRGANProcessor(SupportModelImageProcessor):
+class ESRGANProcessor(SupportModelProcessor):
     """
     Holds a reference to the esrganer and provides a callable
     """
@@ -35,7 +35,7 @@ class ESRGANProcessor(SupportModelImageProcessor):
             )[0]
         )
 
-class GFPGANProcessor(SupportModelImageProcessor):
+class GFPGANProcessor(SupportModelProcessor):
     """
     Holds a reference to the gfpganer and provides a callable
     """
@@ -60,7 +60,7 @@ class GFPGANProcessor(SupportModelImageProcessor):
         multiplier = outscale / 4
         return result.resize((int(width * multiplier), int(height * multiplier)))
 
-class CCSRProcessor(SupportModelImageProcessor):
+class CCSRProcessor(SupportModelProcessor):
     """
     Holds a reference to the CCSR LDM and provides a callable
     """
@@ -179,7 +179,7 @@ class CCSRProcessor(SupportModelImageProcessor):
         samples = (rearrange(samples, "b c h w -> b h w c") * 255).cpu().numpy().clip(0, 255).astype(np.uint8)
         return Image.fromarray(samples[0])
 
-class FaceRestoreProcessor(SupportModelImageProcessor):
+class FaceRestoreProcessor(SupportModelProcessor):
     """
     Holds a reference to the gfpganer and provides a callable
     """
@@ -253,7 +253,7 @@ class Upscaler(SupportModel):
         tile_pad: int = 10,
         pre_pad: int = 10,
         anime: bool = False,
-    ) -> Iterator[SupportModelImageProcessor]:
+    ) -> Iterator[SupportModelProcessor]:
         """
         Does a simple upscale
         """
@@ -270,7 +270,7 @@ class Upscaler(SupportModel):
             del esrganer
 
     @contextmanager
-    def face_restore(self) -> Iterator[SupportModelImageProcessor]:
+    def face_restore(self) -> Iterator[SupportModelProcessor]:
         """
         Only does face enhancement
         """
@@ -302,7 +302,7 @@ class Upscaler(SupportModel):
         tile: int = 0,
         tile_pad: int = 10,
         pre_pad: int = 10,
-    ) -> Iterator[SupportModelImageProcessor]:
+    ) -> Iterator[SupportModelProcessor]:
         """
         Does an upscale with face enhancement
         """
@@ -333,7 +333,7 @@ class Upscaler(SupportModel):
             del gfpganer
 
     @contextmanager
-    def ccsr(self) -> Iterator[SupportModelImageProcessor]:
+    def ccsr(self) -> Iterator[SupportModelProcessor]:
         """
         Does an upscale using CCSR (content consistent super-resolution)
         """

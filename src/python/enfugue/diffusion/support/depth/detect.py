@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Iterator, Any, TYPE_CHECKING
 from contextlib import contextmanager
 from PIL import Image
-from enfugue.diffusion.support.model import SupportModel, SupportModelImageProcessor
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 
 if TYPE_CHECKING:
     import torch
 
 __all__ = ["DepthDetector"]
 
-class MidasImageProcessor(SupportModelImageProcessor):
+class MidasImageProcessor(SupportModelProcessor):
     """
     Stores the depth model and transform function
     """

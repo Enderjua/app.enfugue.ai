@@ -16,6 +16,23 @@ from diffusers.models.attention import Attention, FeedForward
 from einops import rearrange, repeat
 from typing import Optional
 
+def get_views(video_length, window_size=16, stride=4):
+    num_blocks_time = (video_length - window_size) // stride + 1
+    views = []
+    for i in range(num_blocks_time):
+        t_start = int(i * stride)
+        t_end = t_start + window_size
+        views.append((t_start,t_end))
+    return views
+
+def generate_weight_sequence(n):
+    if n % 2 == 0:
+        max_weight = n // 2
+        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+    else:
+        max_weight = (n + 1) // 2
+        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+    return weight_sequence
 
 class PositionalEncoding(nn.Module):
     """
@@ -57,6 +74,7 @@ class TemporalAttention(Attention):
         **kwargs
     ):
         super().__init__(*args, **kwargs)
+        self.is_cross_attention = kwargs.get("cross_attention_dim", None) is not None
         self.pos_encoder = PositionalEncoding(
             kwargs["query_dim"],
             dropout=0,
@@ -67,8 +85,6 @@ class TemporalAttention(Attention):
         if not hasattr(self, "_default_scale"):
             self._default_scale = self.scale
         self.scale = multiplier / (self.inner_dim // self.heads)
-        from enfugue.util import logger
-        logger.critical(self.scale)
 
     def reset_scale_multiplier(self) -> None:
         self.scale = self._default_scale
@@ -93,18 +109,18 @@ class TransformerTemporalOutput(BaseOutput):
 
 class TransformerTemporal(nn.Module):
     def __init__(
-            self,
-            num_attention_heads: int,
-            attention_head_dim: int,
-            in_channels: int,
-            num_layers: int = 1,
-            dropout: float = 0.0,
-            norm_num_groups: int = 32,
-            cross_attention_dim: Optional[int] = None,
-            attention_bias: bool = False,
-            activation_fn: str = "geglu",
-            positional_encoding_max_length: int = 24,
-            upcast_attention: bool = False,
+        self,
+        num_attention_heads: int,
+        attention_head_dim: int,
+        in_channels: int,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        norm_num_groups: int = 32,
+        cross_attention_dim: Optional[int] = None,
+        attention_bias: bool = False,
+        activation_fn: str = "geglu",
+        positional_encoding_max_length: int = 24,
+        upcast_attention: bool = False,
     ):
         super().__init__()
 
@@ -130,6 +146,7 @@ class TransformerTemporal(nn.Module):
             ]
         )
         self.proj_out = nn.Linear(inner_dim, in_channels)
+        self.is_cross_attention = bool(cross_attention_dim)
 
     def set_attention_scale_multiplier(self, attention_scale: float = 1.0) -> None:
         for block in self.transformer_blocks:
@@ -139,7 +156,13 @@ class TransformerTemporal(nn.Module):
         for block in self.transformer_blocks:
             block.reset_attention_scale_multiplier()
 
-    def forward(self, hidden_states, encoder_hidden_states=None):
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
         _, num_channels, f, height, width = hidden_states.shape
         hidden_states = rearrange(hidden_states, "b c f h w -> (b f) c h w")
 
@@ -150,7 +173,13 @@ class TransformerTemporal(nn.Module):
         hidden_states = self.proj_in(hidden_states)
 
         for block in self.transformer_blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states, number_of_frames=f)
+            hidden_states = block(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                number_of_frames=f,
+                frame_window_size=frame_window_size,
+                frame_window_stride=frame_window_stride,
+            )
 
         hidden_states = self.proj_out(hidden_states)
         hidden_states = rearrange(hidden_states, "bf (h w) c -> bf c h w", h=height, w=width).contiguous()
@@ -163,17 +192,17 @@ class TransformerTemporal(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(
-            self,
-            dim,
-            num_attention_heads,
-            attention_head_dim,
-            dropout=0.0,
-            activation_fn="geglu",
-            attention_bias=False,
-            upcast_attention=False,
-            depth=2,
-            positional_encoding_max_length=24,
-            cross_attention_dim: Optional[int] = None
+        self,
+        dim,
+        num_attention_heads,
+        attention_head_dim,
+        dropout=0.0,
+        activation_fn="geglu",
+        attention_bias=False,
+        upcast_attention=False,
+        depth=2,
+        positional_encoding_max_length=24,
+        cross_attention_dim: Optional[int] = None
     ):
         super().__init__()
 
@@ -211,18 +240,53 @@ class TransformerBlock(nn.Module):
         for block in self.attention_blocks:
             block.reset_scale_multiplier()
 
-    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, number_of_frames=None):
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        number_of_frames=None,
+        frame_window_size=None,
+        frame_window_stride=None,
+    ):
         if not self.is_cross:
             encoder_hidden_states = None
 
-        for block, norm in zip(self.attention_blocks, self.norms):
-            norm_hidden_states = norm(hidden_states)
-            hidden_states = block(
-                norm_hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=attention_mask,
-                number_of_frames=number_of_frames
-            ) + hidden_states
+        if frame_window_size and frame_window_stride:
+            views = get_views(number_of_frames, frame_window_size, frame_window_stride)
+            hidden_states = rearrange(hidden_states, "(b f) d c -> b f d c", f=number_of_frames)
+            count = torch.zeros_like(hidden_states)
+            value = torch.zeros_like(hidden_states)
+
+            for t_start, t_end in views:
+                weight_sequence = generate_weight_sequence(t_end - t_start)
+                weight_tensor = torch.ones_like(count[:, t_start:t_end])
+                weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(hidden_states.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+
+                sub_hidden_states = rearrange(hidden_states[:, t_start:t_end], "b f d c -> (b f) d c")
+                for attention_block, norm in zip(self.attention_blocks, self.norms):
+                    norm_hidden_states = norm(sub_hidden_states)
+                    sub_hidden_states = attention_block(
+                        norm_hidden_states,
+                        encoder_hidden_states=encoder_hidden_states if attention_block.is_cross_attention else None,
+                        number_of_frames=t_end-t_start,
+                    ) + sub_hidden_states
+
+                sub_hidden_states = rearrange(sub_hidden_states, "(b f) d c -> b f d c", f=t_end-t_start)
+                value[:,t_start:t_end] += sub_hidden_states * weight_tensor
+                count[:,t_start:t_end] += weight_tensor
+
+            hidden_states = torch.where(count>0, value/count, value)
+            hidden_states = rearrange(hidden_states, "b f d c -> (b f) d c") 
+        else:
+            for block, norm in zip(self.attention_blocks, self.norms):
+                norm_hidden_states = norm(hidden_states)
+                hidden_states = block(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=attention_mask,
+                    number_of_frames=number_of_frames,
+                ) + hidden_states
 
         norm_hidden_states = self.ff_norm(hidden_states)
         hidden_states = self.ff(norm_hidden_states) + hidden_states

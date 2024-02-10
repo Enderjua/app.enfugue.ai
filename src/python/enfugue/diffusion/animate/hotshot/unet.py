@@ -678,20 +678,22 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             module.gradient_checkpointing = value
 
     def forward(
-            self,
-            sample: torch.FloatTensor,
-            timestep: Union[torch.Tensor, float, int],
-            encoder_hidden_states: torch.Tensor,
-            class_labels: Optional[torch.Tensor] = None,
-            timestep_cond: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-            added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
-            down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
-            mid_block_additional_residual: Optional[torch.Tensor] = None,
-            encoder_attention_mask: Optional[torch.Tensor] = None,
-            return_dict: bool = True,
-            enable_temporal_attentions: bool = True
+        self,
+        sample: torch.FloatTensor,
+        timestep: Union[torch.Tensor, float, int],
+        encoder_hidden_states: torch.Tensor,
+        class_labels: Optional[torch.Tensor] = None,
+        timestep_cond: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
+        down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
+        mid_block_additional_residual: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
+        enable_temporal_attentions: bool = True,
+        frame_window_size: Optional[int] = None,
+        frame_window_stride: Optional[int] = None,
     ) -> Union[UNet3DConditionOutput, Tuple]:
         r"""
         The [`UNet2DConditionModel`] forward method.
@@ -896,13 +898,19 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    enable_temporal_attentions=enable_temporal_attentions
+                    enable_temporal_attentions=enable_temporal_attentions,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
                 )
             else:
-                sample, res_samples = downsample_block(hidden_states=sample,
-                                                       temb=emb,
-                                                       encoder_hidden_states=encoder_hidden_states,
-                                                       enable_temporal_attentions=enable_temporal_attentions)
+                sample, res_samples = downsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    encoder_hidden_states=encoder_hidden_states,
+                    enable_temporal_attentions=enable_temporal_attentions,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
+                )
 
             down_block_res_samples += res_samples
 
@@ -925,7 +933,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
                 cross_attention_kwargs=cross_attention_kwargs,
-                enable_temporal_attentions=enable_temporal_attentions
+                enable_temporal_attentions=enable_temporal_attentions,
+                frame_window_size=frame_window_size,
+                frame_window_stride=frame_window_stride,
             )
 
         if mid_block_additional_residual is not None:
@@ -952,7 +962,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
-                    enable_temporal_attentions=enable_temporal_attentions
+                    enable_temporal_attentions=enable_temporal_attentions,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
                 )
             else:
                 sample = upsample_block(
@@ -961,7 +973,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     res_hidden_states_tuple=res_samples,
                     upsample_size=upsample_size,
                     encoder_hidden_states=encoder_hidden_states,
-                    enable_temporal_attentions=enable_temporal_attentions
+                    enable_temporal_attentions=enable_temporal_attentions,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
                 )
 
         # 6. post-process

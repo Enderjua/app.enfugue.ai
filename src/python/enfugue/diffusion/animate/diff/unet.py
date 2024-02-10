@@ -26,8 +26,11 @@ from enfugue.diffusion.animate.diff.unet_blocks import (
     get_down_block,
     get_up_block,
 )
-from enfugue.diffusion.animate.diff.resnet import InflatedConv3d, InflatedGroupNorm
-
+from enfugue.diffusion.animate.diff.resnet import (
+    LoRACompatibleInflatedConv3d,
+    InflatedConv3d,
+    InflatedGroupNorm
+)
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -78,9 +81,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         num_class_embeds: Optional[int] = None,
         upcast_attention: bool = False,
         resnet_time_scale_shift: str = "default",
-        
         use_inflated_groupnorm=False,
-        
+        use_lora_compatible_layers=True,
         # Additional
         use_motion_module              = False,
         motion_module_resolutions      = ( 1,2,4,8 ),
@@ -97,7 +99,10 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         time_embed_dim = block_out_channels[0] * 4
 
         # input
-        self.conv_in = InflatedConv3d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1))
+        if use_lora_compatible_layers:
+            self.conv_in = LoRACompatibleInflatedConv3d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1))
+        else:
+            self.conv_in = InflatedConv3d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1))
 
         # time
         self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
@@ -151,11 +156,10 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
                 resnet_time_scale_shift=resnet_time_scale_shift,
-
                 unet_use_cross_frame_attention=unet_use_cross_frame_attention,
                 unet_use_temporal_attention=unet_use_temporal_attention,
                 use_inflated_groupnorm=use_inflated_groupnorm,
-                
+                use_lora_compatible_layers=use_lora_compatible_layers,
                 use_motion_module=use_motion_module and (res in motion_module_resolutions) and (not motion_module_decoder_only),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
@@ -181,7 +185,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 unet_use_cross_frame_attention=unet_use_cross_frame_attention,
                 unet_use_temporal_attention=unet_use_temporal_attention,
                 use_inflated_groupnorm=use_inflated_groupnorm,
-                
+                use_lora_compatible_layers=use_lora_compatible_layers,
                 use_motion_module=use_motion_module and motion_module_mid_block,
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
@@ -234,6 +238,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 unet_use_cross_frame_attention=unet_use_cross_frame_attention,
                 unet_use_temporal_attention=unet_use_temporal_attention,
                 use_inflated_groupnorm=use_inflated_groupnorm,
+                use_lora_compatible_layers=use_lora_compatible_layers,
 
                 use_motion_module=use_motion_module and (res in motion_module_resolutions),
                 motion_module_type=motion_module_type,
@@ -248,8 +253,12 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             self.conv_norm_out = InflatedGroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
         else:
             self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
+
         self.conv_act = nn.SiLU()
-        self.conv_out = InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+        if use_lora_compatible_layers:
+            self.conv_out = LoRACompatibleInflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+        else:
+            self.conv_out = InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
     def set_attention_slice(self, slice_size):
         r"""
@@ -371,6 +380,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
         motion_attention_mask: Optional[torch.Tensor] = None,
+        frame_window_size: Optional[int] = None,
+        frame_window_stride: Optional[int] = None,
         **kwargs: Any
     ) -> Union[UNet3DConditionOutput, Tuple]:
         r"""
@@ -454,10 +465,19 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     temb=emb,
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
-                    motion_attention_mask=motion_attention_mask
+                    motion_attention_mask=motion_attention_mask,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
                 )
             else:
-                sample, res_samples = downsample_block(hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states, motion_attention_mask=motion_attention_mask)
+                sample, res_samples = downsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    encoder_hidden_states=encoder_hidden_states,
+                    motion_attention_mask=motion_attention_mask,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride,
+                )
 
             down_block_res_samples += res_samples
 
@@ -473,7 +493,13 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
 
         # mid
         sample = self.mid_block(
-            sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask, motion_attention_mask=motion_attention_mask
+            sample,
+            emb,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            motion_attention_mask=motion_attention_mask,
+            frame_window_size=frame_window_size,
+            frame_window_stride=frame_window_stride
         )
 
         # mid controlnet
@@ -500,7 +526,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_hidden_states=encoder_hidden_states,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
-                    motion_attention_mask=motion_attention_mask
+                    motion_attention_mask=motion_attention_mask,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride
                 )
             else:
                 sample = upsample_block(
@@ -509,7 +537,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     res_hidden_states_tuple=res_samples,
                     upsample_size=upsample_size,
                     encoder_hidden_states=encoder_hidden_states,
-                    motion_attention_mask=motion_attention_mask
+                    motion_attention_mask=motion_attention_mask,
+                    frame_window_size=frame_window_size,
+                    frame_window_stride=frame_window_stride
                 )
 
         # post-process
@@ -633,4 +663,3 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
 
         for name, module in self.named_children():
             fn_recursive_attn_processor(name, module, processor)
-

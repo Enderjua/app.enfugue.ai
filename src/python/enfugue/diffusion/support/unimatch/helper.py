@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterator, TYPE_CHECKING
 
-from enfugue.diffusion.support.model import SupportModel
+from enfugue.diffusion.support.model import SupportModel, SupportModelProcessor
 from contextlib import contextmanager
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Unimatch"]
 
-class UnimatchImageProcessor:
+class UnimatchImageProcessor(SupportModelProcessor):
     """
     Used to process between two images.
     """
