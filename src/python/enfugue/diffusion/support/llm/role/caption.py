@@ -12,7 +12,7 @@ class CaptionUpsampler(Role):
     """
     role_name = "caption"
 
-    def format_input(self, message: Optional[str]) -> str:
+    def format_input(self, message: Optional[str], **kwargs: Optional[str]) -> str:
         """
         Given user input, format the message to the bot
         """
@@ -30,7 +30,7 @@ class CaptionUpsampler(Role):
         """
         Reduce the number of maximum tokens
         """
-        return 256
+        return 128
 
     @property
     def system_introduction(self) -> str:

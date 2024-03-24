@@ -44,7 +44,7 @@ class CaptionInvocation:
             pipeline.set_task_callback(task_callback)
         pipeline.start_keepalive()
         try:
-            with pipeline.conversation.upsampler(safe=pipeline.safe) as sampler:
+            with pipeline.language.caption_upsampler(safe=pipeline.safe) as sampler:
                 # Call task callback if set
                 if task_callback is not None:
                     task_callback("Upsampling captions")

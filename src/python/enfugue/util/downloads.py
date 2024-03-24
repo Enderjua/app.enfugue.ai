@@ -53,15 +53,19 @@ def check_download(
     check_size: bool=True,
     resume_size: int = 0,
     progress_callback: Optional[Callable[[int, int], None]]=None,
-    text_callback: Optional[Callable[[str], None]]=None
+    text_callback: Optional[Callable[[str], None]]=None,
+    authorization: Optional[str]=None,
 ) -> None:
     """
     Checks if a file exists.
     If it does, checks the size and matches against the remote URL.
     If it doesn't, or the size doesn't match, download it.
     """
+    headers = {}
+    if authorization is not None:
+        headers["Authorization"] = authorization
     if isinstance(target, str) and os.path.exists(target) and check_size and resume_size <= 0:
-        expected_length = requests.head(remote_url, allow_redirects=True).headers.get("Content-Length", None)
+        expected_length = requests.head(remote_url, headers=headers, allow_redirects=True).headers.get("Content-Length", None)
         actual_length = os.path.getsize(target)
         if expected_length and actual_length != int(expected_length):
             logger.info(
@@ -69,7 +73,6 @@ def check_download(
             )
             os.remove(target)
 
-    headers = {}
     if resume_size is not None:
         headers["Range"] = f"bytes={resume_size:d}-"
 

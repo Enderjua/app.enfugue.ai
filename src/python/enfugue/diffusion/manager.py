@@ -60,10 +60,11 @@ if TYPE_CHECKING:
         IPAdapter,
         BackgroundRemover,
         Interpolator,
-        Conversation,
-        DragAnimatorPipeline,
+        SupportModelPipeline,
         Unimatch,
         FaceAnalyzer,
+        SegmentationDetector,
+        LanguageSupportModel,
         AudioSupportModel,
     )
     from torch import Tensor
@@ -194,6 +195,7 @@ class DiffusionPipelineManager:
         """
         self.patch_freeu()
         self.patch_downloads()
+        self.patch_getattr()
 
     def patch_freeu(self) -> None:
         """
@@ -203,6 +205,13 @@ class DiffusionPipelineManager:
         import diffusers.utils.torch_utils
 
         diffusers.utils.torch_utils.apply_freeu = apply_freeu # type: ignore[assignment]
+
+    def patch_getattr(self) -> None:
+        """
+        Un-monkeypatches the config mixin.
+        """
+        from diffusers.configuration_utils import ConfigMixin
+        ConfigMixin.__getattr__ = object.__getattribute__
 
     def get_download_callback(self, file_label: str) -> Callable[[int, int], None]:
         """
@@ -243,6 +252,7 @@ class DiffusionPipelineManager:
         # Login
         hf_token = self.configuration.get("enfugue.token.huggingface", None)
         if hf_token:
+            logger.critical("Logging into huggingface hub.")
             huggingface_hub.login(token=hf_token)
 
         huggingface_http_get = huggingface_hub.file_download.http_get
@@ -264,7 +274,8 @@ class DiffusionPipelineManager:
                 url,
                 out,
                 resume_size=kwargs.pop("resume_size", 0),
-                text_callback=self.task_callback
+                text_callback=self.task_callback,
+                authorization=None if not hf_token else f"Bearer {hf_token}"
             )
 
         huggingface_hub.file_download.http_get = http_get
@@ -2734,7 +2745,7 @@ class DiffusionPipelineManager:
             device_type = self.device.type
 
             if device_type == "cpu":
-                logger.debug("Inferencing on cpu, must use dtype bfloat16")
+                logger.debug("Inferencing on cpu, will use dtype bfloat16")
                 self._torch_dtype = torch.bfloat16
             elif device_type == "cuda" and torch.version.hip:
                 logger.debug("Inferencing on rocm, must use dtype float32")  # type: ignore[unreachable]
@@ -2747,16 +2758,18 @@ class DiffusionPipelineManager:
                 else:
                     logger.debug(f"Inferencing on {device_type}, using configured dtype {configuration_dtype}")
                     if configuration_dtype == "float16" or configuration_dtype == "half":
-                        self._torch_dtype = torch.half
+                        self._torch_dtype = torch.float16
+                    elif configuration_dtype == "bfloat16":
+                        self._torch_dtype = torch.bfloat16
                     elif (
                         configuration_dtype == "float32"
                         or configuration_dtype == "float"
                         or configuration_dtype == "full"
                     ):
-                        self._torch_dtype = torch.float
+                        self._torch_dtype = torch.float32
                     else:
                         raise ConfigurationError(
-                            f"dtype incorrectly configured, use 'float16/half' or 'float32/float/full', got '{configuration_dtype}'"
+                            f"dtype incorrectly configured, use 'float16/half' or 'bfloat16' or 'float32/float/full', got '{configuration_dtype}'"
                         )
         return self._torch_dtype
 
@@ -2791,7 +2804,15 @@ class DiffusionPipelineManager:
         Returns true if the dtype is half-precision.
         """
         import torch
-        return self.dtype is torch.float16
+        return self.dtype is torch.float16 or self.dtype is torch.bfloat16
+
+    @property
+    def brain_dtype(self) -> torch.dtype:
+        """
+        Gets the DType to use for high-precision ops (bfloat16 when enabled)
+        """
+        import torch
+        return torch.bfloat16 if self.half else torch.float32
 
     @property
     def lora(self) -> List[Tuple[str, float]]:
@@ -3163,6 +3184,20 @@ class DiffusionPipelineManager:
         return "xl" in self.model_name.lower()
 
     @property
+    def is_stable_cascade(self) -> bool:
+        """
+        If the model is cached, we can know for sure by checking for stable-cascade-exclusive models.
+        Otherwise, we guess by file name.
+        """
+        if getattr(self, "_pipeline", None) is not None:
+            return self._pipeline.is_stable_cascade
+        if self.engine_cache_exists:
+            return os.path.exists(os.path.join(self.model_diffusers_cache_dir, "unet_2"))  # type: ignore[arg-type]
+        if ".safetensor" in self.model:
+            return self.model_metadata.is_stable_cascade
+        return "cascade" in self.model_name.lower()
+
+    @property
     def refiner_is_sdxl(self) -> bool:
         """
         If the refiner model is cached, we can know for sure by checking for sdxl-exclusive models.
@@ -3177,6 +3212,22 @@ class DiffusionPipelineManager:
         if ".safetensor" in self.refiner: # type: ignore[operator]
             return self.refiner_metadata.is_sdxl
         return "xl" in self.refiner_name.lower()
+
+    @property
+    def refiner_is_stable_cascade(self) -> bool:
+        """
+        If the refiner model is cached, we can know for sure by checking for stable-cascade-exclusive models.
+        Otherwise, we guess by file name.
+        """
+        if not self.refiner_name:
+            return False
+        if getattr(self, "_refiner_pipeline", None) is not None:
+            return self._refiner_pipeline.is_stable_cascade
+        if self.refiner_engine_cache_exists:
+            return os.path.exists(os.path.join(self.refiner_diffusers_cache_dir, "unet_2"))  # type: ignore[arg-type]
+        if ".safetensor" in self.refiner: # type: ignore[operator]
+            return self.refiner_metadata.is_stable_cascade
+        return "cascade" in self.refiner_name.lower()
 
     @property
     def refiner_requires_aesthetic_score(self) -> bool:
@@ -3209,6 +3260,22 @@ class DiffusionPipelineManager:
         return "xl" in self.inpainter_name.lower()
 
     @property
+    def inpainter_is_stable_cascade(self) -> bool:
+        """
+        If the inpainter model is cached, we can know for sure by checking for stable_cascade-exclusive models.
+        Otherwise, we guess by file name.
+        """
+        if not self.inpainter_name:
+            return self.is_stable_cascade
+        if getattr(self, "_inpainter_pipeline", None) is not None:
+            return self._inpainter_pipeline.is_stable_cascade
+        if self.inpainter_engine_cache_exists:
+            return os.path.exists(os.path.join(self.inpainter_diffusers_cache_dir, "unet_2"))  # type: ignore[arg-type]
+        if ".safetensor" in self.inpainter: # type: ignore[operator]
+            return self.inpainter_metadata.is_stable_cascade
+        return "cascade" in self.inpainter_name.lower()
+
+    @property
     def animator_is_sdxl(self) -> bool:
         """
         If the animator model is cached, we can know for sure by checking for sdxl-exclusive models.
@@ -3225,6 +3292,22 @@ class DiffusionPipelineManager:
         return "xl" in self.animator_name.lower()
 
     @property
+    def animator_is_stable_cascade(self) -> bool:
+        """
+        If the animator model is cached, we can know for sure by checking for stable_cascade-exclusive models.
+        Otherwise, we guess by file name.
+        """
+        if not self.animator_name:
+            return False
+        if getattr(self, "_animator_pipeline", None) is not None:
+            return self._animator_pipeline.is_stable_cascade
+        if self.animator_engine_cache_exists:
+            return os.path.exists(os.path.join(self.animator_diffusers_cache_dir, "unet_2"))  # type: ignore[arg-type]
+        if ".safetensor" in self.animator: # type: ignore[operator]
+            return self.animator_metadata.is_stable_cascade
+        return "cascade" in self.animator_name.lower()
+
+    @property
     def svd_xt(self) -> bool:
         """
         Returns true if the SVD pipeline should use XT.
@@ -3239,6 +3322,28 @@ class DiffusionPipelineManager:
         if self.svd_xt != value:
             del self.svd_pipeline
         self._svd_xt = value
+
+    @property
+    def dynamicrafter_model(self) -> str:
+        """
+        Gets the dynamicrafter model.
+        """
+        return getattr(
+            self,
+            "_dynamicrafter_model",
+            self.configuration.get(
+                "enfugue.pipeline.dynamicrafter", "1024"
+            )
+        )
+
+    @dynamicrafter_model.setter
+    def dynamicrafter_model(self, value: str) -> None:
+        """
+        Sets the dynamicrafter model, unloads pipeline if set
+        """
+        if self.dynamicrafter_model != value:
+            del self.dynamicrafter
+        self._dynamicrafter_model = value
 
     def check_get_default_model(self, model: str) -> str:
         """
@@ -3437,7 +3542,12 @@ class DiffusionPipelineManager:
 
                 logger.debug(f"Initializing pipeline from checkpoint at {self.model}. Arguments are {redact_for_log(kwargs)}")
 
-                pipeline = self.pipeline_class.from_ckpt(self.model, **kwargs)
+                pipeline = self.pipeline_class.from_ckpt(
+                    self.model,
+                    device=self.device,
+                    **kwargs
+                )
+
                 if pipeline.is_sdxl and "16" not in self.model and (self.vae_name is None or "16" not in self.vae_name):
                     # We may have made an incorrect guess earlier if 'xl' wasn't in the filename.
                     # We can fix that here, though, by forcing full precision VAE
@@ -3608,6 +3718,7 @@ class DiffusionPipelineManager:
                 refiner_pipeline = self.refiner_pipeline_class.from_ckpt(
                     self.refiner,
                     load_safety_checker=False,
+                    device=self.device,
                     **kwargs,
                 )
 
@@ -3789,7 +3900,10 @@ class DiffusionPipelineManager:
                 )
 
                 inpainter_pipeline = self.inpainter_pipeline_class.from_ckpt(
-                    self.inpainter, load_safety_checker=self.safe, **kwargs
+                    self.inpainter,
+                    load_safety_checker=self.safe,
+                    device=self.device,
+                    **kwargs
                 )
                 if inpainter_pipeline.is_sdxl and "16" not in self.inpainter and (self.inpainter_vae_name is None or "16" not in self.inpainter_vae_name):
                     inpainter_pipeline.register_to_config(force_full_precision_vae=True)
@@ -3967,7 +4081,10 @@ class DiffusionPipelineManager:
                 )
 
                 animator_pipeline = self.animator_pipeline_class.from_ckpt(
-                    self.animator, load_safety_checker=self.safe, **kwargs
+                    self.animator,
+                    load_safety_checker=self.safe,
+                    device=self.device,
+                    **kwargs
                 )
                 if animator_pipeline.is_sdxl and self.animator_vae_name not in ["xl16", VAE_XL16]:
                     animator_pipeline.register_to_config(force_full_precision_vae=True)
@@ -4036,13 +4153,12 @@ class DiffusionPipelineManager:
     # Special pipelines
 
     @property
-    def drag_pipeline(self) -> DragAnimatorPipeline:
+    def drag_pipeline(self) -> SupportModelPipeline:
         """
         Gets the drag animator pipeline.
         """
         if not hasattr(self, "_drag_pipeline"):
             from enfugue.diffusion.support import DragAnimator
-            from enfugue.diffusion.util import get_vram_info
             drag_pipeline = DragAnimator(
                 self.engine_root,
                 self.engine_motion_dir,
@@ -4052,7 +4168,6 @@ class DiffusionPipelineManager:
             )
             drag_pipeline.task_callback = self.task_callback
             self.task_callback("Preparing DragNUWA Pipeline")
-            vram_free, vram_total = get_vram_info()
             self._drag_pipeline = drag_pipeline.nuwa()
         return self._drag_pipeline
 
@@ -4064,6 +4179,36 @@ class DiffusionPipelineManager:
         if hasattr(self, "_drag_pipeline"):
             logger.debug("Unloading DragNUWA pipeline.")
             del self._drag_pipeline
+            self.clear_memory()
+
+    @property
+    def dynamicrafter(self) -> SupportModelPipeline:
+        """
+        Gets the dynamicrafter pipeline.
+        """
+        if not hasattr(self, "_dynamicrafter"):
+            from enfugue.diffusion.support import ImageAnimator
+            helper = ImageAnimator(
+                self.engine_root,
+                self.engine_motion_dir,
+                device=self.device,
+                dtype=self.dtype,
+                offline=self.offline
+            )
+            helper.task_callback = self.task_callback
+            self._dynamicrafter = helper.dynamicrafter(
+                model=self.dynamicrafter_model
+            )
+        return self._dynamicrafter
+
+    @dynamicrafter.deleter
+    def dynamicrafter(self) -> None:
+        """
+        Deletes the dynamicrafter animator pipeline.
+        """
+        if hasattr(self, "_dynamicrafer"):
+            logger.debug("Unloading DynamiCrafter pipeline.")
+            del self._dynamicrafter
             self.clear_memory()
 
     @property
@@ -4252,7 +4397,10 @@ class DiffusionPipelineManager:
                 self.engine_upscale_dir,
                 device=self.device,
                 dtype=self.dtype,
-                offline=self.offline
+                offline=self.offline,
+                cache_dir=self.engine_cache_dir,
+                checkpoints_dir=self.engine_checkpoints_dir,
+                clip_dir=self.engine_clip_dir,
             )
             self._upscaler.task_callback = self.task_callback
         return self._upscaler
@@ -4311,21 +4459,21 @@ class DiffusionPipelineManager:
         return self._ip_adapter
 
     @property
-    def conversation(self) -> Conversation:
+    def language(self) -> LanguageSupportModel:
         """
-        Gets an LLM conversation.
+        Gets the LLM helper.
         """
-        if not hasattr(self, "_conversation"):
-            from enfugue.diffusion.support import Conversation
-            self._conversation = Conversation(
+        if not hasattr(self, "_language"):
+            from enfugue.diffusion.support import LanguageSupportModel
+            self._language = LanguageSupportModel(
                 self.engine_root,
                 self.engine_language_dir,
                 device=self.device,
-                dtype=self.dtype,
+                dtype=self.brain_dtype,
                 offline=self.offline
             )
-            self._conversation.task_callback = self.task_callback
-        return self._conversation
+            self._language.task_callback = self.task_callback
+        return self._language
 
     @property
     def interpolator(self) -> Interpolator:
@@ -4394,6 +4542,23 @@ class DiffusionPipelineManager:
             )
             self._audio_model.task_callback = self.task_callback
         return self._audio_model
+
+    @property
+    def segmentation_detector(self) -> SegmentationDetector:
+        """
+        Gets the audio model.
+        """
+        if not hasattr(self, "_segmentation_detector"):
+            from enfugue.diffusion.support import SegmentationDetector
+            self._segmentation_detector = SegmentationDetector(
+                self.engine_root,
+                self.engine_detection_dir,
+                device=self.device,
+                dtype=self.dtype,
+                offline=self.offline
+            )
+            self._segmentation_detector.task_callback = self.task_callback
+        return self._segmentation_detector
 
     # Diffusers model getters
 
@@ -4694,6 +4859,8 @@ class DiffusionPipelineManager:
                 return CONTROLNET_POSE_XL
             elif name == "qr":
                 return CONTROLNET_QR_XL
+            elif name == "tile":
+                return CONTROLNET_TILE_XL
             else:
                 raise ValueError(f"Sorry, ControlNet “{name}” is not yet supported by SDXL. Check back soon!")
         else:

@@ -29,27 +29,32 @@ def main() -> None:
         right.save(os.path.join(save_dir, "right.png"))
 
         manager = DiffusionPipelineManager()
-        with manager.interpolator.film() as interpolate:
-            start = datetime.now()
-            images = interpolate(left, right, num_frames=10, include_ends=True)
-            seconds = (datetime.now() - start).total_seconds()
-            Video(images).save(os.path.join(save_dir, "interpolated.gif"), rate=12.0, overwrite=True)
-            frames = len(images) - 2
-            average = seconds / frames
 
-            print(f"Interpolated {frames} frames in {seconds} ({average}s/frame)")
+        for method in ["rife", "film"]:
+            with manager.interpolator.get(method) as interpolate:
+                start = datetime.now()
+                images = interpolate(left, right, num_frames=10, include_ends=True)
+                seconds = (datetime.now() - start).total_seconds()
+                Video(images).save(
+                    os.path.join(save_dir, f"{method}-interpolated.gif"),
+                    rate=12.0,
+                    overwrite=True
+                )
 
-            def progress_callback(step: int, total: int, rate: float) -> None:
-                print(f"Interpolated {total} frames at {rate}s/frame")
+                frames = len(images) - 2
+                average = seconds / frames
 
-            frames = interpolate_frames(
-                frames=[left, right],
-                multiplier=118,
-                interpolate=interpolate,
-                progress_callback=progress_callback
-            )
+                frames = interpolate_frames(
+                    frames=[left, right],
+                    multiplier=118,
+                    interpolate=interpolate,
+                )
 
-            Video(frames).save(os.path.join(save_dir, "interpolated-long.mp4"), rate=60.0, overwrite=True)
+                Video(frames).save(
+                    os.path.join(save_dir, f"{method}-interpolated-long.mp4"),
+                    rate=60.0,
+                    overwrite=True
+                )
 
 if __name__ == "__main__":
     main()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import gc
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 
 from typing import Iterator, Any, Optional, Callable, List, TYPE_CHECKING
 from typing_extensions import Self
@@ -13,6 +13,12 @@ from enfugue.util import find_file_in_directory, check_download
 if TYPE_CHECKING:
     from PIL.Image import Image
     import torch
+
+__all__ = [
+    "SupportModelPipeline",
+    "SupportModelProcessor",
+    "SupportModel"
+]
 
 class SupportModelProcessor:
     def __init__(self, **kwargs: Any) -> None:
@@ -38,6 +44,26 @@ class SupportModelProcessor:
         Implemented by the image processor.
         """
         raise NotImplementedError("Implementation did not override __call__")
+
+class SupportModelPipeline:
+    """
+    Wraps a processor in a reuseable object
+    """
+    def __init__(self, stack: ExitStack, processor: SupportModelProcessor) -> None:
+        self.stack = stack
+        self.processor = processor
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Pass args/kwargs to processor
+        """
+        return self.processor(*args, **kwargs)
+
+    def __del__(self) -> None:
+        """
+        Exits the stack when deleted
+        """
+        self.stack.close()
 
 class SupportModel:
     """
@@ -67,12 +93,21 @@ class SupportModel:
         self.offline = offline
         self.kwargs = kwargs
 
+    def get_pipeline(self, context_name: str, *args: Any, **kwargs: Any) -> SupportModelPipeline:
+        """
+        Gets a pipeline by name.
+        """
+        stack = ExitStack()
+        processor = stack.enter_context(getattr(self, context_name)(*args, **kwargs))
+        return SupportModelPipeline(stack, processor)
+
     def get_model_file(
         self,
         uri: str,
         directory: Optional[str] = None,
         filename: Optional[str] = None,
         extensions: Optional[List[str]] = None,
+        check_size: bool = True,
     ) -> str:
         """
         Searches for a file in the current directory.
@@ -102,7 +137,8 @@ class SupportModel:
         check_download(
             uri,
             local_path,
-            text_callback=self.task_callback
+            text_callback=self.task_callback,
+            check_size=check_size
         )
         return local_path
 
@@ -133,21 +169,23 @@ class SupportModel:
         """
         Cleans torch memory after processing.
         """
-        self.loaded = True
-        yield self
-        self.loaded = False
-        if getattr(self, "process", None) is not None:
-            del self.process
-        if self.device.type == "cuda":
-            import torch
-            import torch.cuda
+        import torch
+        with torch.no_grad():
+            self.loaded = True
+            yield self
+            self.loaded = False
+            if getattr(self, "process", None) is not None:
+                del self.process
+            if self.device.type == "cuda":
+                import torch
+                import torch.cuda
 
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        elif self.device.type == "mps":
-            import torch
-            import torch.mps
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            elif self.device.type == "mps":
+                import torch
+                import torch.mps
 
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
-        gc.collect()
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+            gc.collect()

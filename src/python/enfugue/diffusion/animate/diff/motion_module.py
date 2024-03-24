@@ -1,8 +1,10 @@
 # type: ignore
 from dataclasses import dataclass
 
+import math
 import torch
 import torch.nn.functional as F
+
 from torch import nn
 
 from diffusers.utils import BaseOutput
@@ -11,25 +13,11 @@ from diffusers.models.attention import Attention, FeedForward
 from diffusers.models.lora import LoRACompatibleLinear
 
 from einops import rearrange, repeat
-import math
 
-def get_views(video_length, window_size=16, stride=4):
-    num_blocks_time = (video_length - window_size) // stride + 1
-    views = []
-    for i in range(num_blocks_time):
-        t_start = int(i * stride)
-        t_end = t_start + window_size
-        views.append((t_start,t_end))
-    return views
-
-def generate_weight_sequence(n):
-    if n % 2 == 0:
-        max_weight = n // 2
-        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
-    else:
-        max_weight = (n + 1) // 2
-        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
-    return weight_sequence
+from enfugue.diffusion.util.torch_util.animation_util import (
+    get_frame_views,
+    get_frame_weight_sequence
+)
 
 def zero_module(module):
     # Zero out the parameters of a module and return it.
@@ -301,12 +289,12 @@ class TemporalTransformerBlock(nn.Module):
         frame_window_stride=None,
     ):
         if frame_window_size and frame_window_stride:
-            views = get_views(video_length, frame_window_size, frame_window_stride)
+            views = get_frame_views(video_length, frame_window_size, frame_window_stride)
             hidden_states = rearrange(hidden_states, "(b f) d c -> b f d c", f=video_length)
             count = torch.zeros_like(hidden_states)
             value = torch.zeros_like(hidden_states)
             for t_start, t_end in views:
-                weight_sequence = generate_weight_sequence(t_end - t_start)
+                weight_sequence = get_frame_weight_sequence(t_end - t_start)
                 weight_tensor = torch.ones_like(count[:, t_start:t_end])
                 weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(hidden_states.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
 
@@ -334,9 +322,22 @@ class TemporalTransformerBlock(nn.Module):
                     video_length=video_length,
                     motion_attention_mask=motion_attention_mask,
                 ) + hidden_states
-            
-        hidden_states = self.ff(self.ff_norm(hidden_states)) + hidden_states
-        
+
+        if frame_window_size:
+            chunk_dim = 0
+            chunk_size = frame_window_size * 2
+            num_chunks = hidden_states.shape[0] // chunk_size
+            hidden_states = torch.cat(
+                [
+                    self.ff(self.ff_norm(hidden_state_slice))
+                    for hidden_state_slice
+                    in hidden_states.chunk(num_chunks, dim=chunk_dim)
+                ],
+                dim=chunk_dim
+            ) + hidden_states
+        else:
+            hidden_states = self.ff(self.ff_norm(hidden_states)) + hidden_states
+
         output = hidden_states  
         return output
 

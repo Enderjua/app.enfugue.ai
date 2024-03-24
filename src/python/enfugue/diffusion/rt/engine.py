@@ -26,7 +26,7 @@ from polygraphy.backend.trt import (
 )
 
 from enfugue.util import logger
-from enfugue.diffusion.util import DTypeConverter
+from enfugue.diffusion.util import TorchDataTypeConverter
 from enfugue.diffusion.rt.model import BaseModel
 
 
@@ -131,7 +131,7 @@ class Engine:
             if self.engine.binding_is_input(binding):
                 self.context.set_binding_shape(i, shape)
 
-            tensor = torch.empty(tuple(shape), dtype=DTypeConverter.from_numpy(dtype)).to(device=device)
+            tensor = torch.empty(tuple(shape), dtype=TorchDataTypeConverter.from_numpy(dtype)).to(device=device)
             self.tensors[binding] = tensor
             self.buffers[binding] = cuda.DeviceView(ptr=tensor.data_ptr(), shape=shape, dtype=dtype)
             logger.debug(f"Binding {binding} to tensor of shape {shape}")

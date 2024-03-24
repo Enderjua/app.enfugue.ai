@@ -126,8 +126,8 @@ class MotionTrainer:
         name: str,
         cache_dir: str,
         output_dir: str,
-        video_path: str,
-        training_prompt: str,
+        video_path: Union[str, List[str]],
+        training_prompt: Union[str, List[str]],
         device: Union[str, TorchDevice],
         validation_prompt: Optional[Union[str, List[str]]]=None,
         validation_negative_prompt: Optional[Union[str, List[str]]]=None,
@@ -226,32 +226,27 @@ class MotionTrainer:
         unet.to(device)
         pipeline.to(device)
 
-        # Create training data dictionary
-        train_data = {
-            "single_video_path": video_path,
-            "single_video_prompt": training_prompt,
-            "max_chunks": self.max_chunks,
-            "frame_step": self.frame_step,
-            "n_sample_frames": self.sample_frames,
-            "width": self.width,
-            "height": self.height,
-            "sample_width": self.sample_width,
-            "sample_height": self.sample_height,
-            "sample_size": (self.sample_height, self.sample_width),
-            "sample_start_idx": 0,
-            "fps": self.fps,
-            "use_bucketing": self.use_bucketing,
-            "lora_rank": self.lora_rank
-        }
+        # Create training data dictionaries
+        if not isinstance(video_path, list):
+            video_path = [video_path]
+        videos = len(video_path)
+        if not isinstance(training_prompt, list):
+            training_prompt = [training_prompt]
+        prompts = len(training_prompt)
 
-        logger.info(f"Creating training dataset using configuration {train_data}")
+        training_prompt = training_prompt[:videos]
+        if prompts < videos:
+            training_prompt += [
+                training_prompt[-1]
+                for i in range(videos-prompts)
+            ]
 
-        # Create dataset
-        train_dataset = get_train_dataset(
-            dataset_types=["single_video"],
-            train_data={
-                "single_video_path": video_path,
-                "single_video_prompt": training_prompt,
+        train_dataset = []
+
+        for this_video_path, this_training_prompt in zip(video_path, training_prompt):
+            train_data = {
+                "single_video_path": this_video_path,
+                "single_video_prompt": this_training_prompt,
                 "max_chunks": self.max_chunks,
                 "frame_step": self.frame_step,
                 "n_sample_frames": self.sample_frames,
@@ -264,10 +259,33 @@ class MotionTrainer:
                 "fps": self.fps,
                 "use_bucketing": self.use_bucketing,
                 "lora_rank": self.lora_rank
-            },
-            tokenizer=tokenizer,
-        )
+            }
 
+            logger.info(f"Creating training dataset using configuration {train_data}")
+
+            # Create dataset
+            train_dataset.extend(
+                get_train_dataset(
+                    dataset_types=["single_video"],
+                    train_data={
+                        "single_video_path": this_video_path,
+                        "single_video_prompt": this_training_prompt,
+                        "max_chunks": self.max_chunks,
+                        "frame_step": self.frame_step,
+                        "n_sample_frames": self.sample_frames,
+                        "width": self.width,
+                        "height": self.height,
+                        "sample_width": self.sample_width,
+                        "sample_height": self.sample_height,
+                        "sample_size": (self.sample_height, self.sample_width),
+                        "sample_start_idx": 0,
+                        "fps": self.fps,
+                        "use_bucketing": self.use_bucketing,
+                        "lora_rank": self.lora_rank
+                    },
+                    tokenizer=tokenizer,
+                )
+            )
         if len(train_dataset) > 0:
             train_dataset = ConcatDataset(train_dataset)
         else:

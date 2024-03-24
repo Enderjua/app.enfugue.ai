@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from math import ceil
-from contextlib import ExitStack
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator, List, Optional, Callable, Any, Dict, TYPE_CHECKING
 
-from contextlib import contextmanager
 from enfugue.util import logger
 from enfugue.diffusion.constants import *
-from enfugue.diffusion.support.model import SupportModel
+from enfugue.diffusion.support.model import (
+    SupportModel,
+    SupportModelPipeline,
+    SupportModelProcessor
+)
 
 if TYPE_CHECKING:
     from torch import device as Device, dtype as DType, Tensor
@@ -17,11 +20,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DragAnimatorProcessor",
-    "DragAnimatorPipeline",
     "DragAnimator"
 ]
 
-class DragAnimatorProcessor:
+class DragAnimatorProcessor(SupportModelProcessor):
     """
     Calls DragNUWA
     """
@@ -274,70 +276,6 @@ class DragAnimatorProcessor:
                     raise IOError("No results!")
                 return output_sequences
 
-class DragAnimatorPipeline:
-    """
-    This class functions as a re-callable pipeline that can be deleted
-    """
-    def __init__(self, stack: ExitStack, processor: DragAnimatorProcessor):
-        self.stack = stack
-        self.processor = processor
-
-    def __call__(
-        self,
-        image: Image,
-        motion_vectors: List[List[MotionVectorPointDict]] = [],
-        width: int=576,
-        height: int=320,
-        fps: int=4,
-        seed: int=42,
-        num_frames: int=14,
-        frame_window_size: int=14,
-        motion_bucket_id: int=27,
-        batch_size: int=1,
-        gaussian_sigma: int=20,
-        noise_aug_strength: float=0.02,
-        num_inference_steps: int=25,
-        min_guidance_scale: float=1.0,
-        max_guidance_scale: float=3.0,
-        optical_flow: Optional[Dict[OPTICAL_FLOW_METHOD_LITERAL, List[List[Image]]]] = None,
-        progress_callback: Optional[Callable[[int, int, float], None]]=None,
-        motion_vector_repeat_window: bool=False,
-        latent_callback: Optional[Callable[[Tensor, int], None]]=None,
-        latent_callback_steps: Optional[int]=None,
-    ) -> List[List[Image]]:
-        """
-        Pass through to the processor
-        """
-        # Call
-        return self.processor(
-            fps=fps,
-            image=image,
-            seed=seed,
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            frame_window_size=frame_window_size,
-            num_inference_steps=num_inference_steps,
-            min_guidance_scale=min_guidance_scale,
-            max_guidance_scale=max_guidance_scale,
-            optical_flow=optical_flow,
-            motion_vectors=motion_vectors,
-            motion_bucket_id=motion_bucket_id,
-            batch_size=batch_size,
-            gaussian_sigma=gaussian_sigma,
-            noise_aug_strength=noise_aug_strength,
-            progress_callback=progress_callback,
-            latent_callback=latent_callback,
-            latent_callback_steps=latent_callback_steps,
-            motion_vector_repeat_window=motion_vector_repeat_window
-        )
-
-    def __del__(self) -> None:
-        """
-        Exit the stack when deleted
-        """
-        self.stack.close()
-
 class DragAnimator(SupportModel):
     """
     Maps DragNUWA to a support model and returns an easy callable
@@ -345,13 +283,11 @@ class DragAnimator(SupportModel):
     WEIGHTS_PATH = "https://huggingface.co/benjamin-paine/dragnuwa-pruned-safetensors/resolve/main/dragnuwa-svd-pruned.safetensors"
     WEIGHTS_PATH_FP16 = "https://huggingface.co/benjamin-paine/dragnuwa-pruned-safetensors/resolve/main/dragnuwa-svd-pruned.fp16.safetensors"
 
-    def nuwa(self, **kwargs: Any) -> DragAnimatorPipeline:
+    def nuwa(self, *args: Any, **kwargs: Any) -> SupportModelPipeline:
         """
         Gets a re-usable dragnuwa model
         """
-        stack = ExitStack()
-        processor = stack.enter_context(self.nuwa_processor(**kwargs))
-        return DragAnimatorPipeline(stack, processor)
+        return self.get_pipeline("nuwa_processor", *args, **kwargs)
 
     @contextmanager
     def nuwa_processor(self, **kwargs: Any) -> Iterator[DragAnimatorProcessor]:
@@ -359,19 +295,17 @@ class DragAnimator(SupportModel):
         Gets the DragNUWA model and yields a processor
         """
         import torch
+        from enfugue.diffusion.util import inject_state_dict
         from enfugue.diffusion.animate.dragnuwa.net import DragNUWANet # type: ignore
-        from enfugue.diffusion.animate.dragnuwa.utils import ( # type: ignore
-            adaptively_load_state_dict
-        )
         weights_file = self.get_model_file(self.WEIGHTS_PATH_FP16 if self.dtype is torch.float16 else self.WEIGHTS_PATH)
         with self.context():
             network = DragNUWANet(device=self.device.type, **kwargs)
             network.eval()
             network.to(device=self.device, dtype=self.dtype)
             logger.debug(f"Loading DragNUWA state dictionary from {weights_file}")
-            adaptively_load_state_dict(
-                network,
+            inject_state_dict(
                 weights_file,
+                network,
                 device=self.device.type,
                 dtype=self.dtype
             )

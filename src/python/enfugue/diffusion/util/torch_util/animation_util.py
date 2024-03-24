@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from PIL.Image import Image
 
 __all__ = [
+    "get_frame_views",
+    "get_frame_weight_sequence",
     "linear_length",
     "linear_point",
     "quadratic_bezier_length",
@@ -28,6 +30,35 @@ __all__ = [
     "optical_flow_conditioning_tensor",
     "flow_condition_to_image_sequence"
 ]
+
+
+def get_frame_views(
+    video_length: int,
+    window_size: int=16,
+    stride: int=4
+) -> List[Tuple[int, int]]:
+    """
+    Gets frame views for context windowing
+    """
+    num_blocks_time = (video_length - window_size) // stride + 1
+    views = []
+    for i in range(num_blocks_time):
+        t_start = int(i * stride)
+        t_end = t_start + window_size
+        views.append((t_start,t_end))
+    return views
+
+def get_frame_weight_sequence(n: int) -> List[int]:
+    """
+    Gets a list of weights for merging context windows
+    """
+    if n % 2 == 0:
+        max_weight = n // 2
+        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+    else:
+        max_weight = (n + 1) // 2
+        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+    return weight_sequence
 
 def linear_length(
     point_1: Tuple[float, float],

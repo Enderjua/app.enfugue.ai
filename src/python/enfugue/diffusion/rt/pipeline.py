@@ -28,7 +28,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 
 from enfugue.util import logger, merge_tokens
 from enfugue.diffusion.pipeline import EnfugueStableDiffusionPipeline
-from enfugue.diffusion.util import DTypeConverter
+from enfugue.diffusion.util import TorchDataTypeConverter
 from enfugue.diffusion.rt.engine import Engine
 from enfugue.diffusion.rt.model import BaseModel, UNet, VAE, CLIP, ControlledUNet
 
@@ -136,7 +136,7 @@ class EnfugueTensorRTStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
         """
         Gets a device view over a tensor
         """
-        return cuda.DeviceView(ptr=t.data_ptr(), shape=t.shape, dtype=DTypeConverter.from_torch(t.dtype))
+        return cuda.DeviceView(ptr=t.data_ptr(), shape=t.shape, dtype=TorchDataTypeConverter.from_torch(t.dtype))
 
     def controlled_unet_forward(self, *args, **kwargs):
         """

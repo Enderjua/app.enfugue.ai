@@ -46,6 +46,7 @@ class IPAdapter(SupportModel):
 
     DEFAULT_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter_sd15.bin"
     FINE_GRAINED_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter-plus_sd15.bin"
+    COMPOSITION_ADAPTER_PATH = "https://huggingface.co/ostris/ip-composition-adapter/resolve/main/ip_plus_composition_sd15.safetensors"
     FACE_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter-plus-face_sd15.bin"
     FACE_FULL_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter-full-face_sd15.bin"
     FACE_ID_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid_sd15.bin"
@@ -56,6 +57,7 @@ class IPAdapter(SupportModel):
     FACE_ID_ENCODER_CONFIG_PATH = "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/config.json"
 
     XL_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter_sdxl.bin"
+    COMPOSITION_XL_ADAPTER_PATH = "https://huggingface.co/ostris/ip-composition-adapter/resolve/main/ip_plus_composition_sdxl.safetensors"
     FINE_GRAINED_XL_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.bin"
     FACE_XL_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus-face_sdxl_vit-h.bin"
     FACE_ID_XL_ADAPTER_PATH = "https://huggingface.co/h94/IP-Adapter-FaceID/resolve/main/ip-adapter-faceid_sdxl.bin"
@@ -177,10 +179,26 @@ class IPAdapter(SupportModel):
         state_dict = self.xl_state_dict if is_sdxl else self.default_state_dict
 
         keepalive_callback()
-        layers.load_state_dict(state_dict["ip_adapter"])
+        if "ip_adapter" in state_dict:
+            layers.load_state_dict(state_dict["ip_adapter"])
+        else:
+            layers.load_state_dict(dict([
+                (key[11:], value)
+                for key, value in state_dict.items()
+                if key[:10] == "ip_adapter"
+            ]))
 
         keepalive_callback()
-        self.projector.load_state_dict(state_dict["image_proj"])
+        if "image_proj" in state_dict:
+            self.projector.load_state_dict(state_dict["image_proj"])
+        else:
+            self.projector.load_state_dict(dict([
+                (key[11:], value)
+                for key, value in state_dict.items()
+                if key[:10] == "image_proj"
+            ]))
+
+        del state_dict
 
         if controlnets is not None:
             keepalive_callback()
@@ -201,7 +219,7 @@ class IPAdapter(SupportModel):
         """
         Returns true if using a plus model
         """
-        return self.model in ["plus", "plus-face", "full-face"]
+        return self.model in ["plus", "plus-face", "full-face", "composition"]
 
     @property
     def use_mlp(self) -> bool:
@@ -379,6 +397,9 @@ class IPAdapter(SupportModel):
         elif self.model == "face-id-portrait":
             model_url = self.FACE_ID_PORTRAIT_PATH
             filename = "ip-adapter-faceid-portrait_sd15.pth"
+        elif self.model == "composition":
+            model_url = self.COMPOSITION_ADAPTER_PATH
+            filename = "ip_plus_composition_sd15.safetensors"
         else:
             model_url = self.DEFAULT_ADAPTER_PATH
             filename = "ip-adapter_sd15.pth"
@@ -440,6 +461,9 @@ class IPAdapter(SupportModel):
         elif self.model == "face-id-plus":
             model_url = self.FACE_ID_XL_PLUS_PATH
             filename = "ip-adapter-faceid-plusv2_sdxl.pth"
+        elif self.model == "composition":
+            model_url = self.COMPOSITION_XL_ADAPTER_PATH
+            filename = "ip_plus_composition_sdxl.safetensors"
         else:
             model_url = self.XL_ADAPTER_PATH
             filename = "ip-adapter_sdxl.pth"
@@ -457,7 +481,7 @@ class IPAdapter(SupportModel):
         """
         if self.model == "full-face" and not self.is_sdxl:
             return 257
-        elif self.model in ["plus", "plus-face", "full-face"] or (
+        elif self.model in ["plus", "plus-face", "full-face", "composition"] or (
             self.model in ["face-id-portrait"] and not self.is_sdxl
         ):
             return 16

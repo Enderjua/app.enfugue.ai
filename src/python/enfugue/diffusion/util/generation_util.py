@@ -9,8 +9,30 @@ if TYPE_CHECKING:
     from PIL import Image, ImageDraw, ImageFont
 
 __all__ = [
-    "GridMaker"
+    "GridMaker",
+    "seed_all"
 ]
+
+def seed_all(seed: Optional[int]=None) -> int:
+    """
+    Seeds all seedable RNGs
+    """
+    import os
+    import random
+    import numpy as np
+    import torch
+    if seed is None:
+        try:
+            seed = int(os.environ["GLOBAL_SEED"])
+        except:
+            seed = random.randint(0x1000000, 0xFFFFFFFF)
+
+    os.environ["GLOBAL_SEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    return seed
 
 class GridMaker:
     """

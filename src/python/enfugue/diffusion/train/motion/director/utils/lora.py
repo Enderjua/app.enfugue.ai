@@ -409,7 +409,10 @@ def inject_trainable_lora_extended(
     names = []
 
     if loras != None:
-        loras = torch.load(loras)
+        if loras.endswith(".safetensors"):
+            loras = load_safeloras(loras)
+        else:
+            loras = torch.load(loras)
 
     for _module, name, _child_module in _find_modules(
         model, target_replace_module, search_class=[nn.Linear, nn.Conv2d, nn.Conv3d]

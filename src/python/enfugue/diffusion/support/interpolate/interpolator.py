@@ -4,7 +4,7 @@ import numpy as np
 
 from enfugue.diffusion.support.model import SupportModel
 
-from typing import Iterator, Any, Tuple, List, TYPE_CHECKING
+from typing import Iterator, Any, Tuple, List, Any, TYPE_CHECKING
 
 from contextlib import contextmanager
 
@@ -12,16 +12,17 @@ if TYPE_CHECKING:
     import torch
     import numpy as np
     from PIL import Image
+    from enfugue.diffusion.support.interpolate.rife.RIFE_HDv3 import Model as RIFEModel
 
 __all__ = ["Interpolator"]
 
 class InterpolatorImageProcessor:
     """
-    Used to interpolate between two images.
+    Used to interpolate between two images
     """
     def __init__(
         self,
-        model: torch.ScriptModule,
+        model: Union[RIFEModel, torch.ScriptModule],
         device: torch.device,
         dtype: torch.dtype,
         **kwargs: Any
@@ -30,6 +31,10 @@ class InterpolatorImageProcessor:
         self.device = device
         self.dtype = dtype
 
+class FILMImageProcessor(InterpolatorImageProcessor):
+    """
+    Used to interpolate between two images using FILM
+    """
     def __call__(
         self,
         left: Image.Image,
@@ -38,7 +43,7 @@ class InterpolatorImageProcessor:
         include_ends: bool = False
     ) -> List[Image.Image]:
         """
-        Runs the interpolator.
+        Runs the FILM interpolator.
         """
         import torch
         import numpy as np
@@ -115,14 +120,54 @@ class InterpolatorImageProcessor:
             return result_images[1:-1]
         return result_images
 
+class RIFEImageProcessor(InterpolatorImageProcessor):
+    """
+    Used to interpolate between two images using RIFE
+    """
+    def __call__(
+        self,
+        left: Image.Image,
+        right: Image.Image,
+        num_frames: int=1,
+        include_ends: bool=False,
+        scale: float=1.0,
+    ) -> List[Image.Image]:
+        """
+        Runs the RIFE interpolator.
+        """
+        import torch
+        from torch.nn import functional as F
+        from enfugue.diffusion.util import image_to_tensor, tensor_to_image
+        left_tensor = image_to_tensor(left).to(self.device)
+        right_tensor = image_to_tensor(right).to(self.device)
+        assert left_tensor.shape == right_tensor.shape, "images must be the same dimension and type"
+        _, c, h, w = left_tensor.shape
+        scaled_pad = max(128, int(128/scale))
+        pad_w = ((w - 1) // scaled_pad + 1) * scaled_pad
+        pad_h = ((h - 1) // scaled_pad + 1) * scaled_pad
+        padding = (0, pad_w - w, 0, pad_h - h)
+        left_tensor = F.pad(left_tensor, padding)
+        right_tensor = F.pad(right_tensor, padding)
+        middle = [
+            self.model.inference(left_tensor, right_tensor, timestep=timestep, scale=scale)[0]
+            for timestep in torch.linspace(0, 1, num_frames+2)[1:-1].to(self.device)
+        ]
+        middle_frames = [
+            tensor_to_image(frame[:h, :w]) for frame in middle
+        ]
+        if include_ends:
+            return [left] + middle_frames + [right]
+        return middle_frames
+
 class Interpolator(SupportModel):
     """
     Used to remove backgrounds from images automatically
     """
     FILM_NET_PATH = "https://github.com/dajes/frame-interpolation-pytorch/releases/download/v1.0.2/film_net_fp16.pt"
+    RIFE_NET_PATH = "https://huggingface.co/benjamin-paine/rife/rife_flow_net_v4.15.pkl"
 
     @contextmanager
-    def film(self) -> Iterator[InterpolatorImageProcessor]:
+    def film(self) -> Iterator[FILMImageProcessor]:
         """
         Instantiate the FILM interpolator and return the callable
         """
@@ -131,7 +176,36 @@ class Interpolator(SupportModel):
             model_path = self.get_model_file(self.FILM_NET_PATH)
             model = torch.jit.load(model_path, map_location="cpu")
             model.eval().to(device=self.device, dtype=self.dtype)
-            processor = InterpolatorImageProcessor(model, self.device, self.dtype)
+            processor = FILMImageProcessor(model, self.device, self.dtype)
             yield processor
             del processor
             del model
+
+    @contextmanager
+    def rife(self) -> Iterator[RIFEImageProcessor]:
+        """
+        Instantiate the RIFE interpolator and return the callable
+        """
+        from enfugue.diffusion.support.interpolate.rife.RIFE_HDv3 import Model
+        with self.context():
+            model_path = self.get_model_file(self.RIFE_NET_PATH, check_size=False)
+            model = Model(model_path, self.device)
+            processor = RIFEImageProcessor(model, self.device, self.dtype)
+            yield processor
+            del processor
+            del model
+
+    @contextmanager
+    def get(
+        self,
+        model: Literal["film", "rife"],
+        *args: Any,
+        **kwargs: Any
+    ) -> Iterator[InterpolatorImageProcessor]:
+        """
+        Gets an interpolator by name
+        """
+        if model not in ["film", "rife"]:
+            raise ValueError(f"Model {model} not supported.") # type: ignore
+        with getattr(self, model)(*args, **kwargs) as processor: # type: ignore
+            yield processor

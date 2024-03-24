@@ -137,7 +137,7 @@ class LayeredInvocation:
     crop_inpaint: bool=True
     scale_inpaint: bool=True
     inpaint_feather: int=32
-    inpaint_upscale_amount: float=0.5
+    inpaint_upscale_amount: float=1.0
     outpaint: bool=True
     outpaint_dilate: int=4
     # Refining
@@ -159,9 +159,9 @@ class LayeredInvocation:
     detailer_guidance_scale: Optional[float]=None
     detailer_inference_steps: Optional[int]=None
     detailer_inpaint_strength: float=0.25
-    detailer_inpaint_dilate_ratio: float=0.33
+    detailer_inpaint_dilate_ratio: float=0.4
     detailer_inpaint_blur: int=16
-    detailer_inpaint_feather: int=16
+    detailer_inpaint_feather: int=32
     detailer_inpaint_min_size: int=64
     detailer_inpaint_ip_adapter_scale=0.65
     detailer_controlnet: Optional[CONTROLNET_LITERAL]=None
@@ -170,6 +170,7 @@ class LayeredInvocation:
     detailer_upscale_amount: float=0.5
     upscale: Optional[Union[UpscaleStepDict, List[UpscaleStepDict]]]=None
     interpolate_frames: Optional[int]=None
+    interpolate_model: Literal["rife", "film"]="film"
     reflect: bool=False
 
     @property
@@ -425,6 +426,8 @@ class LayeredInvocation:
 
         # The widest point is where the horizontal projection will have the maximum value
         widest_row = np.argmax(horizontal_projection)
+        move_up_pixels = min(widest_row, move_up_pixels)
+
         # Get the left/right position
         indices = np.where(binary[widest_row])[0]
         left, right = min(indices), max(indices)
@@ -435,6 +438,7 @@ class LayeredInvocation:
 
         # Create a new image that will contain the adjusted mask
         adjusted_image = np.zeros(tuple(binary.shape[:2]), dtype=np.uint8)
+        logger.info(f"Extending image of size {image.size} up by {move_up_pixels} pixel(s). The widest row is at {widest_row}")
 
         # Fill the new image: place the top part higher by move_up_pixels
         adjusted_image[:widest_row-move_up_pixels, :] = top_part[move_up_pixels:]
@@ -932,7 +936,7 @@ class LayeredInvocation:
                 )
             if needs_interpolator:
                 processors["interpolator"] = stack.enter_context( # type: ignore[assignment]
-                    pipeline.interpolator.film()
+                    pipeline.interpolator.get(self.interpolate_model)
                 )
             if needs_pose_detector:
                 processors["pose"] = stack.enter_context(
@@ -2150,7 +2154,7 @@ class LayeredInvocation:
 
         # Determine which pipeline we're going to be using
         use_inpainter = self.detailer_switch_pipeline or invocation_kwargs.get("mask", None) and not self.animation_frames
-        #inpainter_ip_adapter = "plus-face-id"
+        # inpainter_ip_adapter = "face-id"
         inpainter_ip_adapter = None
         use_inpainter = False
 
@@ -2314,7 +2318,7 @@ class LayeredInvocation:
                 task_callback(f"Detailing pass {i+1}/{total_detail_passes}")
 
             (x0, y0), (x1, y1) = bounding_box
-            extend_up = (y1 - y0) // 3
+            extend_up = (y1 - y0) // 2
             dilate_amount = max(self.detailer_inpaint_feather, int(self.detailer_inpaint_dilate_ratio * max((x1 - x0), (y1 - y0))))
             y0 = max(y0 - extend_up, 0)
 
@@ -2484,12 +2488,15 @@ class LayeredInvocation:
                 "loop": invocation_kwargs.get("loop", False),
                 "progress_callback": progress_callback,
                 "latent_callback_type": "pil",
+                "tiling_vae": self.tiling_vae,
+                "tiling_unet": self.tiling_unet,
+                "tiling_size": self.tiling_size,
+                "tiling_stride": self.tiling_stride,
+                "tiling_mask_type": self.tiling_mask_type,
             }
 
-            detail_kwargs["ip_adapter_images"] = invocation_kwargs.get("ip_adapter_images", None)
-            """
             # If the pipeline has an IP adapter, pass the image through that
-            if detail_pipeline.ip_adapter_loaded:
+            if inpainter_ip_adapter is not None:
                 # Extend the image crop up and to the sides to get hair for face ID
                 ix0 = max(x0 - 16, 0)
                 ix1 = min(x1 + 16, width-1)
@@ -2503,8 +2510,9 @@ class LayeredInvocation:
                 else:
                     ip_adapter_image = images[frame_start_index].crop((ix0, iy0, ix1, iy1))
                 logger.debug(f"Detail pipeline has IP adapter loaded, adding image to adapter input.")
-                detail_kwargs["ip_adapter_images"] = [(ip_adapter_image, self.detailer_inpaint_ip_adapter_scale)]
-            """
+                detail_kwargs["ip_adapter_images"] = [(ip_adapter_image, self.detailer_inpaint_ip_adapter_scale)] + invocation_kwargs.get("ip_adapter_images", [])
+                # detail_kwargs["ip_adapter_images"] = invocation_kwargs.get("ip_adapter_images", [])
+
             inpaint_image_callback = None
             if image_callback is not None and image_callback_steps:
                 # Create resized callback
@@ -2636,8 +2644,8 @@ class LayeredInvocation:
 
             @contextmanager
             def get_upscale_image() -> Iterator[Callable[[Image], Image]]:
-                if method in ["esrgan", "esrganime", "gfpgan", "ccsr"]:
-                    if method == "ccsr":
+                if method in ["esrgan", "esrganime", "gfpgan", "apisr", "supir", "ccsr"]:
+                    if method in ["supir", "ccsr"]:
                         pipeline.unload_all("clearing memory for upscaler")
                     elif refiner:
                         pipeline.unload_pipeline("clearing memory for upscaler")
@@ -2661,10 +2669,29 @@ class LayeredInvocation:
                                     progress_callback=progress_callback,
                                 )
                             yield execute_upscale
+                    elif method == "supir":
+                        with pipeline.upscaler.supir() as upscale:
+                            def execute_upscale(image: Image) -> Image:
+                                return upscale( # type: ignore[call-arg]
+                                    image,
+                                    outscale=amount,
+                                    tile_diffusion_stride=256,
+                                    tile_diffusion_size=None if not tiling_unet else 512,
+                                    tile_vae_encode_size=None if not tiling_vae else 1024,
+                                    tile_vae_decode_size=None if not tiling_vae else 1024,
+                                    progress_callback=progress_callback,
+                                    seed=self.seed,
+                                )
+                            yield execute_upscale
                     elif method == "gfpgan":
                         with pipeline.upscaler.gfpgan(tile=512) as upscale:
                             def execute_upscale(image: Image) -> Image:
                                 return upscale(image, outscale=amount) # type: ignore[call-arg]
+                            yield execute_upscale
+                    elif method == "apisr":
+                        with pipeline.upscaler.apisr() as upscale:
+                            def execute_upscale(image: Image) -> Image:
+                                return upscale(image, outscale=amount)
                             yield execute_upscale
                     else:
                         with pipeline.upscaler.esrgan(tile=512, anime=method=="esrganime") as upscale:
@@ -2873,7 +2900,7 @@ class LayeredInvocation:
             return result
 
         from enfugue.diffusion.util import interpolate_frames, reflect_frames
-        with pipeline.interpolator.film() as interpolate:
+        with pipeline.interpolator.get(self.interpolate_model) as interpolate:
             pipeline.stop_keepalive()
             if self.interpolate_frames:
                 if task_callback is not None:

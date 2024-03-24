@@ -107,7 +107,7 @@ class Video:
                 else:
                     audio_file = None
 
-                ffmpeg_write_video(clip, path, rate, audiofile=audio_file)
+                ffmpeg_write_video(clip, path, rate, audiofile=audio_file, ffmpeg_params=["-crf", "8"])
 
                 if not os.path.exists(path):
                     raise IOError(f"Nothing was written to {path}")
@@ -145,32 +145,10 @@ class Video:
             path = os.path.expanduser(path)
         if not os.path.exists(path):
             raise IOError(f"Video at path {path} not found or inaccessible")
-        
-        basename, ext = os.path.splitext(os.path.basename(path))
-        if ext in [".gif", ".png", ".apng", ".tiff", ".webp", ".avif"]:
-            from PIL import Image
-            image = Image.open(path)
-            for i in range(image.n_frames):
-                image.seek(i)
-                copied = image.copy()
-                copied = copied.convert("RGBA")
-                yield copied
-            return
 
-        frames = 0
-
+        i = 0
         frame_start = 0 if skip_frames is None else skip_frames
         frame_end = None if maximum_frames is None else frame_start + (maximum_frames * (1 if not divide_frames else divide_frames)) - 1
-
-        frame_string = "end-of-video" if frame_end is None else f"frame {frame_end}"
-        logger.debug(f"Reading video file at {path} starting from frame {frame_start} until {frame_string}")
-
-        from moviepy.editor import VideoFileClip
-        from PIL import Image
-
-        clip = VideoFileClip(path)
-        if on_open is not None:
-            on_open(clip)
 
         def resize_image(image: Image.Image) -> Image.Image:
             """
@@ -187,22 +165,49 @@ class Video:
                 fit=fit,
                 anchor=anchor
             )
+        
+        basename, ext = os.path.splitext(os.path.basename(path))
+        if ext in [".gif", ".png", ".apng", ".tiff", ".webp", ".avif"]:
+            from PIL import Image
+            image = Image.open(path)
+            for i in range(image.n_frames):
+                if frame_start > i:
+                    continue
+                if divide_frames is not None and (i - frame_start) % divide_frames != 0:
+                    continue
+                image.seek(i)
+                yield resize_image(image.convert("RGBA"))
+                if frame_end is not None and i >= frame_end:
+                    break
+            return
+
+        frame_string = "end-of-video" if frame_end is None else f"frame {frame_end}"
+        logger.debug(f"Reading video file at {path} starting from frame {frame_start} until {frame_string}")
+
+        from moviepy.editor import VideoFileClip
+        from PIL import Image
+
+        clip = VideoFileClip(path)
+        if on_open is not None:
+            on_open(clip)
 
         for frame in clip.iter_frames():
-            if frames == 0:
+            if i == 0:
                 logger.debug("First frame captured, iterating.")
 
-            frames += 1
-            if frame_start > frames:
+            i += 1
+
+            if frame_start > i:
                 continue
-            if divide_frames is not None and (frames - frame_start) % divide_frames != 0:
+            if divide_frames is not None and (i - frame_start) % divide_frames != 0:
                 continue
+
             yield resize_image(Image.fromarray(frame))
 
-            if frame_end is not None and frames >= frame_end:
+            if frame_end is not None and i >= frame_end:
                 break
 
-        if frames == 0:
+        if i == 0:
             raise IOError(f"No frames were read from video at {path}")
 
     @classmethod

@@ -34,6 +34,8 @@ __all__ = [
     "DEFAULT_SDXL_MODEL",
     "DEFAULT_SDXL_REFINER",
     "DEFAULT_SDXL_INPAINTING_MODEL",
+    "DEFAULT_CASCADE_PRIOR_MODEL",
+    "DEFAULT_CASCADE_DECODER_MODEL",
     "SDXL_TURBO_MODEL",
     "PLAYGROUND_V2_MODEL",
     "SEGMIND_VEGA_MODEL",
@@ -54,6 +56,7 @@ __all__ = [
     "CONTROLNET_HED",
     "CONTROLNET_SCRIBBLE",
     "CONTROLNET_TILE",
+    "CONTROLNET_TILE_XL",
     "CONTROLNET_INPAINT",
     "CONTROLNET_DEPTH",
     "CONTROLNET_DEPTH_XL",
@@ -129,6 +132,11 @@ __all__ = [
     "CONTROLNET_CONFIG_URL",
     "SDXL_VAE_CONFIG_URL",
     "SD_VAE_CONFIG_URL",
+    "KEY_SD_XL_BASE",
+    "KEY_SD_XL_REFINER",
+    "KEY_SD_2_1",
+    "KEY_UNET_CASCADE_PRIOR",
+    "KEY_UNET_CASCADE_DECODER",
     "KEY_VAE_DIFFUSERS",
     "KEY_XL_VAE_DIFFUSERS",
     "KEY_VAE_UPDATES",
@@ -140,10 +148,12 @@ DEFAULT_INPAINTING_MODEL = "https://huggingface.co/runwayml/stable-diffusion-inp
 DEFAULT_SDXL_MODEL = "https://huggingface.co/benjamin-paine/sd-xl-alternative-bases/resolve/main/sd_xl_base_1.0_fp16_vae.safetensors"
 DEFAULT_SDXL_REFINER = "https://huggingface.co/stabilityai/stable-diffusion-xl-refiner-1.0/resolve/main/sd_xl_refiner_1.0.safetensors"
 DEFAULT_SDXL_INPAINTING_MODEL = "https://huggingface.co/benjamin-paine/sd-xl-alternative-bases/resolve/main/sd_xl_base_1.0_inpainting_0.1.safetensors"
+DEFAULT_CASCADE_PRIOR_MODEL = "https://huggingface.co/stabilityai/stable-cascade-prior/resolve/main/prior/diffusion_pytorch_model.safetensors?filename=stable-cascade-prior.safetensors"
+DEFAULT_CASCADE_DECODER_MODEL = "https://huggingface.co/stabilityai/stable-cascade/resolve/main/decoder/diffusion_pytorch_model.safetensors?filename=stable-cascade.safetensors"
 
 # Other Featured Open-Source Models
 OPEN_DALLE_MODEL = "https://huggingface.co/dataautogpt3/OpenDalleV1.1/resolve/main/OpenDalleV1.1.safetensors"
-PLAYGROUND_V2_MODEL = "https://huggingface.co/playgroundai/playground-v2-1024px-aesthetic/resolve/main/playground-v2.fp16.safetensors"
+PLAYGROUND_V2_MODEL = "https://huggingface.co/playgroundai/playground-v2.5-1024px-aesthetic/resolve/main/playground-v2.5-1024px-aesthetic.fp16.safetensors"
 SEGMIND_VEGA_MODEL = "https://huggingface.co/segmind/Segmind-Vega/resolve/main/segmind-vega.safetensors"
 SDXL_TURBO_MODEL = "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
 ANIMAGINE_MODEL = "https://huggingface.co/cagliostrolab/animagine-xl-3.0/resolve/main/animagine-xl-3.0.safetensors"
@@ -228,11 +238,11 @@ NOISE_METHOD_LITERAL = Literal[
     "velvet", "violet", "random_mix"
 ]
 IP_ADAPTER_LITERAL = Literal[
-    "default", "plus", "plus-face", "full-face",
-    "face-id", "face-id-plus", "face-id-portrait"
+    "default", "plus", "composition", "plus-face",
+    "full-face", "face-id", "face-id-plus", "face-id-portrait"
 ]
 ANIMATION_ENGINE_LITERAL = Literal[
-    "ad_hsxl", "svd"
+    "ad_hsxl", "svd", "dynamicrafter"
 ]
 OPTICAL_FLOW_METHOD_LITERAL = Literal[
     "lucas-kanade", "dense-lucas-kanade", "farneback", "rlof", "unimatch"
@@ -279,6 +289,7 @@ CONTROLNET_QR = "https://huggingface.co/monster-labs/control_v1p_sd15_qrcode_mon
 CONTROLNET_PIDI_XL = "https://huggingface.co/SargeZT/controlnet-sd-xl-1.0-softedge-dexined/resolve/main/controlnet-sd-xl-1.0-softedge-dexined.safetensors"
 CONTROLNET_QR_XL = "https://huggingface.co/monster-labs/control_v1p_sdxl_qrcode_monster/resolve/main/diffusion_pytorch_model.safetensors?filename=control_v1p_sdxl_qrcode_monster.safetensors"
 
+CONTROLNET_TILE_XL = "https://huggingface.co/TTPlanet/TTPLanet_SDXL_Controlnet_Tile_Realistic_V1/resolve/main/TTPLANET_Controlnet_Tile_realistic_v1_fp16.safetensors"
 CONTROLNET_CANNY_XL = "https://huggingface.co/diffusers/controlnet-canny-sdxl-1.0/resolve/main/diffusion_pytorch_model.safetensors?filename=controlnet-canny-sdxl-1.0.safetensors"
 CONTROLNET_DEPTH_XL = "https://huggingface.co/diffusers/controlnet-depth-sdxl-1.0/resolve/main/diffusion_pytorch_model.safetensors?filename=controlnet-depth-sdxl-1.0.safetensors"
 CONTROLNET_POSE_XL = "https://huggingface.co/thibaud/controlnet-openpose-sdxl-1.0/resolve/main/OpenPoseXL2.safetensors"
@@ -306,6 +317,12 @@ DPO_OFFSET = "https://huggingface.co/benjamin-paine/sd-dpo-offsets/resolve/main/
 DPO_OFFSET_XL = "https://huggingface.co/benjamin-paine/sd-dpo-offsets/resolve/main/sd_xl_unet_dpo_offset_v1.safetensors"
 
 OFFSET_LORA_XL = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_offset_example-lora_1.0.safetensors"
+
+KEY_UNET_CASCADE_PRIOR = "down_blocks.1.65.attention.to_k.weight"
+KEY_UNET_CASCADE_DECODER = "up_blocks.1.48.channelwise.0.weight"
+KEY_SD_2_1 = "model.diffusion_model.input_blocks.2.1.transformer_blocks.0.attn2.to_k.weight"
+KEY_SD_XL_BASE = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias"
+KEY_SD_XL_REFINER = "conditioner.embedders.0.model.transformer.resblocks.9.mlp.c_proj.bias"
 
 KEY_VAE_DIFFUSERS = "decoder.mid_block.attentions.0.value.bias"
 KEY_XL_VAE_DIFFUSERS = "encoder.mid_block.attentions.0.to_q.weight"

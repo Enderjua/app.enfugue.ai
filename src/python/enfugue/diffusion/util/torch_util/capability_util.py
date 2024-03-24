@@ -15,6 +15,8 @@ __all__ = [
     "get_vram_info",
     "empty_cache",
     "debug_tensors",
+    "set_max_split_size_mb",
+    "llama_cpp_available",
 ]
 
 def tensorrt_available() -> bool:
@@ -88,22 +90,25 @@ def get_vram_info() -> Tuple[int, int]:
     import torch
     return torch.cuda.mem_get_info()
 
-def empty_cache() -> None:
+def empty_cache(synchronize: bool=True) -> None:
     """
     Empties caches to clear memory.
     """
+    import gc
+    gc.collect()
     if cuda_available():
         import torch
         import torch.cuda
         torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if synchronize:
+            torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
     elif mps_available():
         import torch
         import torch.mps
         torch.mps.empty_cache()
-        torch.mps.synchronize()
-    import gc
-    gc.collect()
+        if synchronize:
+            torch.mps.synchronize()
 
 def debug_tensors(*args: Any, **kwargs: Any) -> None:
     """
@@ -120,13 +125,50 @@ def debug_tensors(*args: Any, **kwargs: Any) -> None:
         for key, value in tensor_dict.items():
             if isinstance(value, list) or isinstance(value, tuple):
                 for i, v in enumerate(value):
-                    debug_tensors(**{f"{key}_{i}": v})
+                    debug_tensors(include_bounds=include_bounds, **{f"{key}_{i}": v})
             elif isinstance(value, dict):
                 for k, v in value.items():
-                    debug_tensors(**{f"{key}_{k}": v})
+                    debug_tensors(include_bounds=include_bounds, **{f"{key}_{k}": v})
             elif isinstance(value, torch.Tensor):
                 if include_bounds:
                     t_min, t_max = value.aminmax()
                     logger.debug(f"{key} = {value.shape} ({value.dtype}) on {value.device}, min={t_min}, max={t_max}")
                 else:
                     logger.debug(f"{key} = {value.shape} ({value.dtype}) on {value.device}")
+
+def set_max_split_size_mb(
+    module: torch.nn.Module,
+    max_split_size_mb: int,
+    enable_grad: bool=False
+) -> None:
+    """
+    Sets the maximum split size in the model.
+    """
+    import torch
+    for param in module.parameters():
+        param.requires_grad = False
+
+    try:
+        module(torch.randn(1,1))
+    except:
+        pass
+
+    allocator = torch.cuda.memory._get_memory_allocator()
+    allocator.set_max_split_size(max_split_size_mb * 1024 * 1024)
+
+    if enable_grad:
+        for param in model.parameters():
+            param.requires_grad = True
+
+def llama_cpp_available() -> bool:
+    """
+    Returns true if the llama_cpp library is available.
+    """
+    if not hasattr(llama_cpp_available, "_available"):
+        try:
+            import llama_cpp
+            llama_cpp # silence importchecker
+            llama_cpp_available._available = True
+        except:
+            llama_cpp_available._available = False
+    return llama_cpp_available._available

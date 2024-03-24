@@ -5,7 +5,7 @@ from typing import Union, Literal, List, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     import numpy.ndarray as NDArray
     from PIL.Image import Image
-    
+
 
 __all__ = ["ComputerVision"]
 

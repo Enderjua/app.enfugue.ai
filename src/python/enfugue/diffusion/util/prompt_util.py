@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 from compel import Compel, DownweightMode, BaseTextualInversionManager
 from compel.embeddings_provider import EmbeddingsProvider, EmbeddingsProviderMulti, ReturnedEmbeddingsType
+
 from typing import Optional, Union, Tuple, List, Callable, TYPE_CHECKING
+from typing_extensions import Self
 
 if TYPE_CHECKING:
     import torch
     from transformers import CLIPTokenizer, CLIPTextModel
-    from torch import Tensor
+    from torch import Tensor, dtype as DType
 
 __all__ = ["Prompt", "EncodedPrompt", "EncodedPrompts", "PromptEncoder"]
 
@@ -203,6 +205,19 @@ class EncodedPrompt:
     pooled_embeds: Optional[Tensor]
     negative_pooled_embeds: Optional[Tensor]
 
+    def to(self, dtype: DType) -> Self:
+        """
+        Calls to() on the child tensors.
+        """
+        self.embeds = self.embeds.to(dtype=dtype)
+        if self.negative_embeds is not None:
+            self.negative_embeds = self.negative_embeds.to(dtype=dtype)
+        if self.pooled_embeds is not None:
+            self.pooled_embeds = self.pooled_embeds.to(dtype=dtype)
+        if self.negative_pooled_embeds is not None:
+            self.negative_pooled_embeds = self.negative_pooled_embeds.to(dtype=dtype)
+        return self
+
     def __str__(self) -> str:
         return str(self.prompt)
 
@@ -325,7 +340,7 @@ class EncodedPrompts:
     Holds any number of encoded prompts.
     """
     prompts: List[EncodedPrompt]
-    is_sdxl: bool
+    use_pooled: bool
     do_classifier_free_guidance: bool
     image_prompt_embeds: Optional[Tensor] # input, frames, batch, tokens, embeds
     image_uncond_prompt_embeds: Optional[Tensor] # input, frames, batch, tokens, embeds
@@ -477,7 +492,7 @@ class EncodedPrompts:
         result = self.get_mean_tensor(get_embeds)
         if result is None:
             return None
-        if self.is_sdxl and self.image_prompt_embeds is not None:
+        if self.use_pooled and self.image_prompt_embeds is not None:
             ip_embeds = self.get_image_prompt_embeds(frames)
             if frames:
                 base_tokens = result.shape[2]
@@ -493,12 +508,12 @@ class EncodedPrompts:
                     result[:, :(base_tokens-ip_tokens), :],
                     ip_embeds
                 ], dim=1)
-        if self.is_sdxl and self.do_classifier_free_guidance:
+        if self.use_pooled and self.do_classifier_free_guidance:
             negative_result = self.get_negative_embeds(frames)
             if negative_result is None:
                 negative_result = torch.zeros_like(result)
             result = torch.cat([negative_result, result], dim=0)
-        elif not self.is_sdxl and self.image_prompt_embeds is not None and result is not None:
+        elif not self.use_pooled and self.image_prompt_embeds is not None and result is not None:
             if self.do_classifier_free_guidance:
                 negative, positive = result.chunk(2)
             else:
@@ -549,7 +564,7 @@ class EncodedPrompts:
         """
         Gets the encoded negative embeds.
         """
-        if not self.is_sdxl:
+        if not self.use_pooled:
             return None
         import torch
         get_embeds: PromptGetterCallable = lambda prompt: prompt.get_negative_embeds(frames=frames, frequencies=frequencies, amplitudes=amplitudes)
@@ -557,7 +572,7 @@ class EncodedPrompts:
         if result is None:
             return result
         stack_dim = 2 if frames else 1
-        if self.is_sdxl and self.image_uncond_prompt_embeds is not None and result is not None:
+        if self.use_pooled and self.image_uncond_prompt_embeds is not None and result is not None:
             uncond_ip_embeds = self.get_image_uncond_prompt_embeds(frames)
             if frames:
                 base_uncond_tokens = result.shape[2]
@@ -604,7 +619,7 @@ class EncodedPrompts:
         """
         Gets the encoded pooled embeds.
         """
-        if not self.is_sdxl:
+        if not self.use_pooled:
             return None
         get_embeds: PromptGetterCallable = lambda prompt: prompt.get_pooled_embeds(frames=frames, frequencies=frequencies, amplitudes=amplitudes)
         result = self.get_mean_tensor(get_embeds)
@@ -621,7 +636,7 @@ class EncodedPrompts:
         """
         Gets the encoded negative pooled embeds.
         """
-        if not self.is_sdxl:
+        if not self.use_pooled:
             return None
         get_embeds: PromptGetterCallable = lambda prompt: prompt.get_negative_pooled_embeds(frames=frames, frequencies=frequencies, amplitudes=amplitudes)
         result = self.get_mean_tensor(get_embeds)
@@ -638,7 +653,7 @@ class EncodedPrompts:
         """
         Gets added text embeds for SDXL.
         """
-        if not self.is_sdxl:
+        if not self.use_pooled:
             return None
         import torch
         pooled_embeds = self.get_pooled_embeds(frames=frames, frequencies=frequencies, amplitudes=amplitudes)
@@ -659,3 +674,11 @@ class EncodedPrompts:
         if not self.prompts:
             raise ValueError("No prompts, cannot determine dtype.")
         return self.prompts[0].dtype
+
+    @dtype.setter
+    def dtype(self, new_dtype: torch.dtype) -> None:
+        """
+        Sets the dtype of encoded prompts.
+        """
+        for i, prompt in enumerate(self.prompts):
+            self.prompts[i] = self.prompts[i].to(dtype=new_dtype)

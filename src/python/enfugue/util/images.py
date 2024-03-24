@@ -15,6 +15,7 @@ from pibble.util.strings import get_uuid
 __all__ = [
     "fit_image",
     "tile_image",
+    "image_tiles",
     "image_from_uri",
     "images_are_equal",
     "get_frames_or_image",
@@ -369,14 +370,43 @@ def create_mask(
     draw.rectangle([(left, top), (right, bottom)], fill="#ffffff")
     return image
 
-def scale_image(image: Image, scale: Union[int, float]) -> Image:
+def scale_image(
+    image: Image,
+    scale: Union[int, float]=1.0,
+    nearest: int=1,
+    smallest: Optional[int]=None,
+) -> Image:
     """
     Scales an image proportionally.
     """
+    from PIL import Image
     width, height = image.size
-    scaled_width = 8 * round((width * scale) / 8)
-    scaled_height = 8 * round((height * scale) / 8)
-    return image.resize((scaled_width, scaled_height))
+    width *= scale
+    height *= scale
+    if smallest is not None:
+       smallest_side = min(width, height)
+       if smallest_side < smallest:
+            additional_upscale = smallest / smallest_side
+            width *= additional_upscale
+            height *= additional_upscale
+    width = nearest * round(width / nearest)
+    height = nearest * round(height / nearest)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+def image_tiles(
+    image: Image,
+    tile_size: int,
+    tile_stride: int,
+) -> Iterator[Image]:
+    """
+    Gets image tiles using sliding windows.
+    """
+    from enfugue.util.misc import sliding_windows
+    width, height = image.size
+    for x0, x1, y0, y1 in sliding_windows(width, height, tile_size, tile_stride):
+        cropped = image.crop((x0, y0, x1, y1))
+        setattr(cropped, "coordinates", (x0, y0, x1, y1))
+        yield cropped
 
 def get_image_metadata(image: Union[str, Image, List[Image]]) -> Dict[str, Any]:
     """

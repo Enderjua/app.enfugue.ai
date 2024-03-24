@@ -33,6 +33,14 @@ def main() -> None:
             logger.info(f"{name} took {time:.2f} seconds")
             return result
 
+        with manager.upscaler.apisr() as apisr:
+            for i, image in enumerate(images[:1]):
+                image.save(os.path.join(save_dir, f"base-{i}.png"))
+                time_function(lambda: apisr(image, outscale=2), f"2× APISR Image {i}").save(
+                    os.path.join(save_dir, f"apisr-2x-{i}.png")
+                )
+                time_function(lambda: apisr(image, outscale=4), f"4× APISR Image {i}")
+
         with manager.upscaler.esrgan(tile=512) as esrgan:
             for i, image in enumerate(images):
                 image.save(os.path.join(save_dir, f"base-{i}.png"))

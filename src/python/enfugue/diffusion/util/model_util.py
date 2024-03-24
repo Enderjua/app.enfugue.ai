@@ -17,9 +17,6 @@ if TYPE_CHECKING:
 __all__ = ["ModelMerger", "ModelMetadata"]
 
 KEY_INPUT = "model.diffusion_model.input_blocks.0.0.weight"
-KEY_2_1 = "model.diffusion_model.input_blocks.2.1.transformer_blocks.0.attn2.to_k.weight"
-KEY_XL_BASE = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias"
-KEY_XL_REFINER = "conditioner.embedders.0.model.transformer.resblocks.9.mlp.c_proj.bias"
 KEY_PLAYGROUND_V2 = "conditioner.embedders.0.transformer.text_model.embeddings.position_ids"
 SAFETENSORS_MODEL_NAMES = [
     "diffusion_pytorch_model{variant}.safetensors",
@@ -31,7 +28,7 @@ class ModelMetadata:
     """
     Allows introspecting various Stable Diffusion models.
     """
-    model_type: Literal["SD1", "SD2", "SDXL-Base", "SDXL-Refiner"]
+    model_type: Literal["SD1", "SD2", "SDXL-Base", "SDXL-Refiner", "Stable-Cascade-Prior", "Stable-Cascade"]
     image_size: int
     in_channels: int
     model_subtype: Optional[str] = None
@@ -39,6 +36,10 @@ class ModelMetadata:
     @property
     def is_sdxl(self) -> bool:
         return self.model_type in ["SDXL-Base", "SDXL-Refiner"]
+
+    @property
+    def is_stable_cascade(self) -> bool:
+        return self.model_type in ["Stable-Cascade-Prior", "Stable-Cascade"]
 
     @staticmethod
     def from_file(file_path: str) -> ModelMetadata:
@@ -55,7 +56,7 @@ class ModelMetadata:
             from safetensors import safe_open
             with safe_open(file_path, framework="pt", device="cpu") as f:
                 keys = list(f.keys())
-                for key in [KEY_INPUT, KEY_2_1]:
+                for key in [KEY_INPUT, KEY_SD_2_1]:
                     if key in keys:
                         checkpoint[key] = f.get_tensor(key)
         else:
@@ -65,14 +66,20 @@ class ModelMetadata:
         model_subtype = None
         in_channels = 4
 
-        if KEY_2_1 in keys and checkpoint[KEY_2_1].shape[-1] == 1024:
+        if KEY_SD_2_1 in keys and checkpoint[KEY_SD_2_1].shape[-1] == 1024:
             model_type = "SD2"
             image_size = 768
-        elif KEY_XL_BASE in keys:
+        elif KEY_SD_XL_BASE in keys:
             model_type = "SDXL-Base"
             image_size = 1024
-        elif KEY_XL_REFINER in keys:
+        elif KEY_SD_XL_REFINER in keys:
             model_type = "SDXL-Refiner"
+            image_size = 1024
+        elif KEY_UNET_CASCADE_PRIOR in keys:
+            model_type = "Stable-Cascade-Prior"
+            image_size = 1024
+        elif KEY_UNET_CASCADE_DECODER in keys:
+            model_type = "Stable-Cascade"
             image_size = 1024
         else:
             model_type = "SD1"

@@ -1,3 +1,7 @@
-from enfugue.diffusion.support.llm.conversation import Conversation
-Conversation # Silence importchecker
-__all__ = ["Conversation"]
+from enfugue.diffusion.support.llm.helper import (
+    LanguageSupportModel,
+    LanguageSupportModelImageProcessor,
+    LanguageSupportModelTextProcessor,
+)
+LanguageSupportModel, LanguageSupportModelImageProcessor, LanguageSupportModelTextProcessor # Silence importchecker
+__all__ = ["LanguageSupportModel", "LanguageSupportModelImageProcessor", "LanguageSupportModelTextProcessor"]

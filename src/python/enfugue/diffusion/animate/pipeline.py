@@ -88,7 +88,10 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
         requires_aesthetic_score: bool = False,
         force_full_precision_vae: bool = False,
         controlnets: Optional[Dict[str, ControlNetModel]] = None,
+        unet_2: Optional[StableCascadeUNet] = None,
         ip_adapter: Optional[IPAdapter] = None,
+        prior_latent_scale: float = 42.67,
+        decoder_latent_scale: float = 10.67,
         engine_size: int = 512,  # Recommended even for machines that can handle more
         tiling_size: Optional[int] = None,
         tiling_stride: Optional[int] = 32,
@@ -115,6 +118,7 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
             force_full_precision_vae=force_full_precision_vae,
             requires_aesthetic_score=requires_aesthetic_score,
             controlnets=controlnets,
+            unet_2=unet_2,
             ip_adapter=ip_adapter,
             engine_size=engine_size,
             tiling_stride=tiling_stride,
@@ -122,7 +126,9 @@ class EnfugueAnimateStableDiffusionPipeline(EnfugueStableDiffusionPipeline):
             tiling_mask_type=tiling_mask_type,
             tiling_mask_kwargs=tiling_mask_kwargs,
             frame_window_size=frame_window_size,
-            frame_window_stride=frame_window_stride
+            frame_window_stride=frame_window_stride,
+            prior_latent_scale=prior_latent_scale,
+            decoder_latent_scale=decoder_latent_scale,
         )
 
         if override_scheduler_config:

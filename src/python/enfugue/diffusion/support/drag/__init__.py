@@ -1,5 +1,5 @@
-from enfugue.diffusion.support.drag.helper import DragAnimator, DragAnimatorPipeline
-DragAnimator, DragAnimatorPipeline # Silence importchecker
+from enfugue.diffusion.support.drag.helper import DragAnimator
+DragAnimator # Silence importchecker
 __all__ = [
-    "DragAnimator", "DragAnimatorPipeline"
+    "DragAnimator"
 ]
